@@ -1,6 +1,8 @@
 # USB Device Auto-Config for Linux
 
-Automatically generate udev rules for your USB devices (mice, keyboards, game controllers, etc.) with a single command. No more manual rule creation!
+Automatically generate udev rules for USB devices on Linux, enabling WebHID access for gaming peripherals. Fix connection issues with Pulsar, Finalmouse, Wooting, Razer, Logitech, and other gaming device configuration software.
+
+**Solves the "Failed to open the device" error when using web-based device configuration tools.**
 
 ## Quick Start (One Command!)
 
@@ -24,7 +26,18 @@ sudo ./install.sh
 
 ## Why You Need This
 
-Many USB devices (gaming mice, RGB keyboards, controllers) need udev rules to work with configuration software on Linux. This tool makes it automatic instead of requiring manual rule creation.
+Many gaming peripherals use WebHID for configuration through browser-based tools. Without proper udev rules, you'll encounter:
+- ❌ "Failed to open the device" errors
+- ❌ "NotAllowedError" in Chrome/Chromium
+- ❌ Device not detected in configuration software
+
+**Supported Devices:**
+- 🖱️ Gaming Mice: Pulsar, Finalmouse, Razer, Logitech G, SteelSeries, Glorious, Zowie
+- ⌨️ Gaming Keyboards: Wooting, Razer, Corsair, HyperX, Ducky
+- 🎮 Controllers: Xbox, PlayStation, 8BitDo
+- 🎧 Gaming Headsets and other USB peripherals
+
+This tool automatically creates the necessary udev rules with proper permissions for WebHID access.
 
 ## Basic Usage
 
@@ -111,6 +124,10 @@ If your device configuration software still doesn't work:
 - Python 3.6+
 - Linux with udev
 - sudo access (for creating rules)
+
+## Keywords / SEO
+
+Gaming mouse Linux, WebHID Linux, udev rules gaming, Pulsar mouse Linux, Finalmouse Linux, Wooting keyboard Linux, Failed to open device Linux, NotAllowedError WebHID, Chrome WebHID permissions, gaming peripherals Linux, RGB mouse Linux, gaming keyboard configuration Linux, USB device permissions Linux
 
 ## License
 
