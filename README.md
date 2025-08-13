@@ -4,6 +4,8 @@ Automatically generate udev rules for USB devices on Linux, enabling WebHID acce
 
 **Solves the "Failed to open the device" error when using web-based device configuration tools.**
 
+**Now with a native Linux GUI application!** 🎉
+
 ## Quick Start (One Command!)
 
 ```bash
@@ -41,13 +43,30 @@ This tool automatically creates the necessary udev rules with proper permissions
 
 ## Basic Usage
 
-After installation, just run:
+### GUI Mode (Recommended)
+
+After installation, launch the GUI from your application menu or run:
+
+```bash
+udev-autoconfig-gui
+```
+
+The GUI will:
+- Display all USB devices with status indicators
+- Allow easy selection with checkboxes
+- Show which devices already have rules configured
+- Provide a preview of rules before applying
+- Automatically prompt for admin privileges when needed
+
+### Command Line Mode
+
+For command-line usage:
 
 ```bash
 sudo udev-autoconfig
 ```
 
-The tool will:
+The CLI tool will:
 1. Show you all USB devices
 2. Highlight which ones don't have rules yet
 3. Let you select which ones to configure
@@ -121,9 +140,17 @@ If your device configuration software still doesn't work:
 
 ## Requirements
 
+### Core Requirements
 - Python 3.6+
 - Linux with udev
 - sudo access (for creating rules)
+
+### GUI Requirements (optional)
+- GTK 4.0+
+- libadwaita 1.0+
+- PyGObject (python3-gi)
+
+The installer will automatically detect and install GUI dependencies on supported distributions.
 
 ## Keywords / SEO
 

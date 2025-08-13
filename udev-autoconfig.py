@@ -160,8 +160,9 @@ class UdevRuleGenerator:
                     # Look for complete vendor:product pairs in the same rule line
                     for line in content.split('\n'):
                         if 'idVendor' in line and 'idProduct' in line:
-                            vendor_match = re.search(r'idVendor[}=]="?([0-9a-fA-F]+)"?', line)
-                            product_match = re.search(r'idProduct[}=]="?([0-9a-fA-F]+)"?', line)
+                            # Match both ATTRS{idVendor}=="xxxx" and idVendor=="xxxx" formats
+                            vendor_match = re.search(r'(?:ATTRS\{)?idVendor[}=]+="?([0-9a-fA-F]+)"?', line)
+                            product_match = re.search(r'(?:ATTRS\{)?idProduct[}=]+="?([0-9a-fA-F]+)"?', line)
                             
                             if vendor_match and product_match:
                                 vid = vendor_match.group(1).lower()
@@ -247,13 +248,15 @@ class UdevRuleGenerator:
                         device_already_configured = False
                         for line in rule_block.split('\n'):
                             if 'idVendor' in line and 'idProduct' in line:
-                                vendor_match = re.search(r'idVendor[}=]="?([0-9a-fA-F]+)"?', line)
-                                product_match = re.search(r'idProduct[}=]="?([0-9a-fA-F]+)"?', line)
+                                # Match both ATTRS{idVendor}=="xxxx" and idVendor=="xxxx" formats
+                                vendor_match = re.search(r'(?:ATTRS\{)?idVendor[}=]+="?([0-9a-fA-F]+)"?', line)
+                                product_match = re.search(r'(?:ATTRS\{)?idProduct[}=]+="?([0-9a-fA-F]+)"?', line)
                                 if vendor_match and product_match:
                                     vid = vendor_match.group(1)
                                     pid = product_match.group(1)
-                                    # Check if this exact vendor:product combo already exists
-                                    if f'idVendor}}=="{vid}"' in existing_content and f'idProduct}}=="{pid}"' in existing_content:
+                                    # Check if this exact vendor:product combo already exists (check for both formats)
+                                    if (f'idVendor}}=="{vid}"' in existing_content or f'idVendor}}=="{vid.lower()}"' in existing_content.lower()) and \
+                                       (f'idProduct}}=="{pid}"' in existing_content or f'idProduct}}=="{pid.lower()}"' in existing_content.lower()):
                                         device_already_configured = True
                                         print(f"{Colors.YELLOW}⚠ Device {vid}:{pid} already has rules in {filepath}, skipping...{Colors.RESET}")
                                         break
