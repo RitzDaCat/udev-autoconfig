@@ -1,3 +1,4 @@
+#!/usr/bin/env xdg-open
 [Desktop Entry]
 Name=USB Device Configuration
 Comment=Configure udev rules for USB devices
