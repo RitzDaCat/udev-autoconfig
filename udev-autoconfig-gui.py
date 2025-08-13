@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 from typing import List, Dict, Optional
 import re
+import types
 
 # Import the existing backend classes from the main script
 import importlib.util
@@ -29,9 +30,18 @@ if not os.path.exists(udev_script_path):
     if os.path.exists("/usr/local/bin/udev-autoconfig"):
         udev_script_path = "/usr/local/bin/udev-autoconfig"
 
-spec = importlib.util.spec_from_file_location("udev_autoconfig", udev_script_path)
-udev_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(udev_module)
+# Load the module - handle files without .py extension
+if udev_script_path.endswith('.py'):
+    spec = importlib.util.spec_from_file_location("udev_autoconfig", udev_script_path)
+    udev_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(udev_module)
+else:
+    # For files without .py extension, use exec
+    import types
+    udev_module = types.ModuleType("udev_autoconfig")
+    with open(udev_script_path, 'r') as f:
+        exec(f.read(), udev_module.__dict__)
+    sys.modules["udev_autoconfig"] = udev_module
 UdevDevice = udev_module.UdevDevice
 UdevRuleGenerator = udev_module.UdevRuleGenerator
 
