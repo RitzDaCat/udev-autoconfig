@@ -43,5 +43,11 @@ Thumbs.db
 htmlcov/
 
 # Local config
-*.local
 .env
+
+# Arch Linux build artifacts
+pkg/
+src/
+*.pkg.tar.zst
+*.pkg.tar.xz
+*.pkg.tar.gz

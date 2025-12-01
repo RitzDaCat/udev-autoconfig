@@ -11,37 +11,60 @@ import threading
 from pathlib import Path
 from typing import List, Dict, Optional
 import re
-import types
 
 # Import the existing backend classes from the main script
 import importlib.util
+import types
 
-# Try to find the udev-autoconfig.py script
-try:
-    # First try relative to this script
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    udev_script_path = os.path.join(script_dir, "udev-autoconfig.py")
-except NameError:
-    # If __file__ is not defined (e.g., in exec context), use current directory
-    udev_script_path = os.path.join(os.getcwd(), "udev-autoconfig.py")
 
-# Also check standard installation path
-if not os.path.exists(udev_script_path):
-    if os.path.exists("/usr/local/bin/udev-autoconfig"):
-        udev_script_path = "/usr/local/bin/udev-autoconfig"
+def load_udev_module():
+    """
+    Load the udev-autoconfig module from various possible locations.
+    Search order: system paths first, then local development paths.
+    """
+    search_paths = [
+        "/usr/bin/udev-autoconfig",           # Arch Linux pacman install
+        "/usr/local/bin/udev-autoconfig",     # Manual install
+    ]
+    
+    # Add path relative to this script (for development)
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        search_paths.append(os.path.join(script_dir, "udev-autoconfig.py"))
+        search_paths.append(os.path.join(script_dir, "udev-autoconfig"))
+    except NameError:
+        # __file__ not defined, try current directory
+        search_paths.append(os.path.join(os.getcwd(), "udev-autoconfig.py"))
+    
+    udev_script_path = None
+    for path in search_paths:
+        if os.path.exists(path):
+            udev_script_path = path
+            break
+    
+    if udev_script_path is None:
+        raise FileNotFoundError(
+            "Could not find udev-autoconfig. Searched:\n  " + 
+            "\n  ".join(search_paths)
+        )
+    
+    # Load the module - handle files with or without .py extension
+    if udev_script_path.endswith('.py'):
+        spec = importlib.util.spec_from_file_location("udev_autoconfig", udev_script_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    else:
+        # For files without .py extension (installed executables)
+        module = types.ModuleType("udev_autoconfig")
+        with open(udev_script_path, 'r', encoding='utf-8') as f:
+            code = compile(f.read(), udev_script_path, 'exec')
+            exec(code, module.__dict__)
+        sys.modules["udev_autoconfig"] = module
+    
+    return module
 
-# Load the module - handle files without .py extension
-if udev_script_path.endswith('.py'):
-    spec = importlib.util.spec_from_file_location("udev_autoconfig", udev_script_path)
-    udev_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(udev_module)
-else:
-    # For files without .py extension, use exec
-    import types
-    udev_module = types.ModuleType("udev_autoconfig")
-    with open(udev_script_path, 'r') as f:
-        exec(f.read(), udev_module.__dict__)
-    sys.modules["udev_autoconfig"] = udev_module
+
+udev_module = load_udev_module()
 UdevDevice = udev_module.UdevDevice
 UdevRuleGenerator = udev_module.UdevRuleGenerator
 
@@ -169,11 +192,9 @@ class UdevConfigWindow(Adw.ApplicationWindow):
         content_box.set_margin_start(12)
         content_box.set_margin_end(12)
         
-        # Info bar for sudo requirement
+        # Info bar for privilege info
         self.info_bar = Adw.Banner()
-        self.info_bar.set_title("Administrator privileges required")
-        self.info_bar.set_button_label("Run as Admin")
-        self.info_bar.connect("button-clicked", self.on_run_as_admin)
+        self.info_bar.set_title("Admin privileges will be requested when creating rules")
         content_box.append(self.info_bar)
         
         # Summary info box
@@ -260,6 +281,23 @@ class UdevConfigWindow(Adw.ApplicationWindow):
         configured_title.set_markup("<b>Devices With Existing Rules</b>")
         configured_title.set_halign(Gtk.Align.START)
         configured_header.append(configured_title)
+        
+        # Select all/none buttons for configured devices
+        configured_select_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        configured_select_box.set_hexpand(True)
+        configured_select_box.set_halign(Gtk.Align.END)
+        
+        select_all_configured_btn = Gtk.Button(label="Select All")
+        select_all_configured_btn.connect("clicked", self.on_select_all_configured)
+        select_all_configured_btn.add_css_class("flat")
+        configured_select_box.append(select_all_configured_btn)
+        
+        select_none_configured_btn = Gtk.Button(label="Select None")
+        select_none_configured_btn.connect("clicked", self.on_select_none)
+        select_none_configured_btn.add_css_class("flat")
+        configured_select_box.append(select_none_configured_btn)
+        
+        configured_header.append(configured_select_box)
         configured_box.append(configured_header)
         
         # Scrolled window for configured devices
@@ -297,6 +335,13 @@ class UdevConfigWindow(Adw.ApplicationWindow):
         self.dry_run_button.connect("clicked", self.on_dry_run_clicked)
         self.dry_run_button.add_css_class("flat")
         button_box.append(self.dry_run_button)
+        
+        # Remove rules button
+        self.remove_button = Gtk.Button(label="Remove Rules")
+        self.remove_button.set_tooltip_text("Remove udev rules for selected configured devices")
+        self.remove_button.connect("clicked", self.on_remove_clicked)
+        self.remove_button.add_css_class("destructive-action")
+        button_box.append(self.remove_button)
         
         # Apply button
         self.apply_button = Gtk.Button(label="Create Rules")
@@ -337,6 +382,12 @@ class UdevConfigWindow(Adw.ApplicationWindow):
             border-radius: 12px;
             border: 1px solid alpha(@borders, 0.5);
         }
+        .status-configured {
+            color: @success_color;
+        }
+        .status-unconfigured {
+            color: @warning_color;
+        }
         """
         css_provider.load_from_data(css.encode())
         Gtk.StyleContext.add_provider_for_display(
@@ -346,25 +397,41 @@ class UdevConfigWindow(Adw.ApplicationWindow):
         )
     
     def check_sudo_status(self):
-        """Check if running with sudo privileges"""
+        """Check privileges and update UI accordingly"""
         if os.geteuid() == 0:
+            # Running as root - hide the info bar
             self.info_bar.set_visible(False)
-            self.apply_button.set_sensitive(True)
         else:
-            self.info_bar.set_visible(True)
+            # Running as normal user - show info that admin will be requested when needed
+            self.info_bar.set_title("Admin privileges will be requested when creating rules")
+            self.info_bar.set_button_label(None)  # Remove the button
             self.info_bar.set_revealed(True)
-            self.apply_button.set_sensitive(False)
+        
+        # Always enable the apply button - we'll use pkexec for the operation
+        self.apply_button.set_sensitive(True)
     
-    def on_run_as_admin(self, *args):
-        """Restart the application with sudo privileges"""
+    def find_cli_tool(self) -> Optional[str]:
+        """Find the udev-autoconfig CLI tool"""
+        import shutil
+        
+        cli_paths = [
+            shutil.which('udev-autoconfig'),
+            '/usr/bin/udev-autoconfig',
+            '/usr/local/bin/udev-autoconfig',
+        ]
+        
+        # Add path relative to this script for development
         try:
-            # Get the path to this script
-            script_path = os.path.abspath(__file__)
-            # Try to use pkexec for graphical sudo
-            subprocess.Popen(['pkexec', sys.executable, script_path])
-            self.get_application().quit()
-        except Exception as e:
-            self.show_toast(f"Failed to restart with admin privileges: {e}", error=True)
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            cli_paths.append(os.path.join(script_dir, 'udev-autoconfig.py'))
+            cli_paths.append(os.path.join(script_dir, 'udev-autoconfig'))
+        except NameError:
+            pass
+        
+        for path in cli_paths:
+            if path and os.path.exists(path):
+                return path
+        return None
     
     def load_devices(self):
         """Load USB devices in a background thread"""
@@ -465,8 +532,12 @@ class UdevConfigWindow(Adw.ApplicationWindow):
         
         # Update summary labels
         self.total_devices_label.set_text(f"Total Devices: {len(devices)}")
-        self.configured_count_label.set_markup(f"<span color='#26a269'>✓ Configured: {len(configured_devices)}</span>")
-        self.unconfigured_count_label.set_markup(f"<span color='#f6d32d'>⚠ Needs Rules: {len(unconfigured_devices)}</span>")
+        self.configured_count_label.set_text(f"✓ Configured: {len(configured_devices)}")
+        if not self.configured_count_label.has_css_class("status-configured"):
+            self.configured_count_label.add_css_class("status-configured")
+        self.unconfigured_count_label.set_text(f"⚠ Needs Rules: {len(unconfigured_devices)}")
+        if not self.unconfigured_count_label.has_css_class("status-unconfigured"):
+            self.unconfigured_count_label.add_css_class("status-unconfigured")
         
         # Show a toast with device count
         if len(unconfigured_devices) > 0:
@@ -484,16 +555,28 @@ class UdevConfigWindow(Adw.ApplicationWindow):
     
     def on_select_all_unconfigured(self, button):
         """Select all unconfigured devices"""
+        # Cache existing rules once instead of per-row
+        existing = self.generator.get_existing_rules()
         for row in self.device_rows:
-            # Only select if the device doesn't have a rule (checkbox would be active by default)
+            # Only select if the device doesn't have a rule
             if not row.device.vendor_id or not row.device.product_id:
                 continue
-            generator = UdevRuleGenerator()
-            existing = generator.get_existing_rules()
             vid = row.device.vendor_id.lower()
             pid = row.device.product_id.lower()
             has_rule = vid in existing and pid in existing.get(vid, [])
             if not has_rule:
+                row.set_selected(True)
+    
+    def on_select_all_configured(self, button):
+        """Select all configured devices"""
+        existing = self.generator.get_existing_rules()
+        for row in self.device_rows:
+            if not row.device.vendor_id or not row.device.product_id:
+                continue
+            vid = row.device.vendor_id.lower()
+            pid = row.device.product_id.lower()
+            has_rule = vid in existing and pid in existing.get(vid, [])
+            if has_rule:
                 row.set_selected(True)
     
     def on_select_none(self, button):
@@ -547,10 +630,24 @@ class UdevConfigWindow(Adw.ApplicationWindow):
             self.show_toast("No devices selected", error=True)
             return
         
-        # Confirm action
+        # Build list of device names for confirmation
+        device_list = []
+        for device in selected:
+            name = f"{device.vendor_name or 'Unknown'} {device.product_name or 'Device'}"
+            vid_pid = f"[{device.vendor_id}:{device.product_id}]"
+            device_list.append(f"• {name} {vid_pid}")
+        
+        # Confirm action with device list
         dialog = Adw.MessageDialog(transient_for=self)
         dialog.set_heading("Create udev rules?")
-        dialog.set_body(f"This will create udev rules for {len(selected)} selected device(s).")
+        dialog.set_body_use_markup(True)
+        
+        body_text = f"This will create udev rules for <b>{len(selected)}</b> device(s):\n\n"
+        body_text += "\n".join(device_list[:10])  # Limit to 10 devices in preview
+        if len(device_list) > 10:
+            body_text += f"\n... and {len(device_list) - 10} more"
+        
+        dialog.set_body(body_text)
         
         dialog.add_response("cancel", "Cancel")
         dialog.add_response("apply", "Create Rules")
@@ -569,27 +666,77 @@ class UdevConfigWindow(Adw.ApplicationWindow):
         self.set_loading(True)
         self.progress_bar.set_text("Creating rules...")
         
+        # Build device IDs from selected devices
+        device_ids = []
+        device_names = []
+        for device in selected_devices:
+            if device.vendor_id and device.product_id:
+                device_ids.append(f"{device.vendor_id}:{device.product_id}")
+                name = f"{device.vendor_name or 'Unknown'} {device.product_name or 'Device'}"
+                device_names.append(name)
+        
+        if not device_ids:
+            self.show_toast("No valid devices selected", error=True)
+            self.set_loading(False)
+            return
+        
+        # Show what we're about to configure
+        print(f"[GUI] Configuring {len(device_ids)} device(s): {', '.join(device_ids)}")
+        
         def apply_thread():
             try:
-                # Save rules
-                saved = self.generator.save_rules(selected_devices, dry_run=False)
+                cli_tool = self.find_cli_tool()
+                if not cli_tool:
+                    GLib.idle_add(self.show_toast, "Could not find udev-autoconfig CLI tool", True)
+                    GLib.idle_add(self.set_loading, False)
+                    return
                 
-                if saved:
-                    GLib.idle_add(self.progress_bar.set_text, "Applying rules...")
-                    GLib.idle_add(self.progress_bar.set_fraction, 0.5)
-                    
-                    # Reload udev rules
-                    subprocess.run(['udevadm', 'control', '--reload-rules'], check=True)
-                    subprocess.run(['udevadm', 'trigger'], check=True)
-                    
-                    GLib.idle_add(self.progress_bar.set_fraction, 1.0)
-                    GLib.idle_add(self.show_toast, f"Rules created successfully for {len(selected_devices)} device(s)!")
-                    GLib.idle_add(self.load_devices)  # Refresh the list
+                # Determine how to run the CLI tool
+                if os.geteuid() == 0:
+                    # Already root, run directly
+                    if cli_tool.endswith('.py'):
+                        cmd = [sys.executable, cli_tool, '--devices'] + device_ids
+                    else:
+                        cmd = [cli_tool, '--devices'] + device_ids
                 else:
-                    GLib.idle_add(self.show_toast, "No new rules were created", True)
+                    # Use pkexec for privilege escalation
+                    if cli_tool.endswith('.py'):
+                        cmd = ['pkexec', sys.executable, cli_tool, '--devices'] + device_ids
+                    else:
+                        cmd = ['pkexec', cli_tool, '--devices'] + device_ids
                 
-            except subprocess.CalledProcessError as e:
-                GLib.idle_add(self.show_toast, f"Failed to apply rules: {e}", True)
+                print(f"[GUI] Running command: {' '.join(cmd)}")
+                
+                GLib.idle_add(self.progress_bar.set_text, "Requesting admin privileges...")
+                GLib.idle_add(self.progress_bar.set_fraction, 0.2)
+                
+                # Run the CLI tool with --devices to create rules for selected devices
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True
+                )
+                
+                # Print CLI output for debugging
+                if result.stdout:
+                    print(f"[CLI stdout] {result.stdout}")
+                if result.stderr:
+                    print(f"[CLI stderr] {result.stderr}")
+                
+                GLib.idle_add(self.progress_bar.set_fraction, 1.0)
+                
+                if result.returncode == 0:
+                    GLib.idle_add(self.show_toast, f"Rules created for {len(device_ids)} device(s)!")
+                    GLib.idle_add(self.load_devices)  # Refresh the list
+                elif result.returncode == 126:
+                    # User cancelled pkexec authentication
+                    GLib.idle_add(self.show_toast, "Authentication cancelled", True)
+                else:
+                    error_msg = result.stderr.strip() if result.stderr else result.stdout.strip() if result.stdout else f"Exit code: {result.returncode}"
+                    GLib.idle_add(self.show_toast, f"Failed: {error_msg}", True)
+                
+            except FileNotFoundError:
+                GLib.idle_add(self.show_toast, "pkexec not found. Please install polkit.", True)
             except Exception as e:
                 GLib.idle_add(self.show_toast, f"Error: {e}", True)
             finally:
@@ -599,10 +746,135 @@ class UdevConfigWindow(Adw.ApplicationWindow):
         thread.daemon = True
         thread.start()
     
+    def on_remove_clicked(self, button):
+        """Remove udev rules for selected devices"""
+        selected = self.get_selected_devices()
+        if not selected:
+            self.show_toast("No devices selected", error=True)
+            return
+        
+        # Filter to only configured devices
+        existing = self.generator.get_existing_rules()
+        configured_selected = []
+        for device in selected:
+            if device.vendor_id and device.product_id:
+                vid = device.vendor_id.lower()
+                pid = device.product_id.lower()
+                if vid in existing and pid in existing.get(vid, []):
+                    configured_selected.append(device)
+        
+        if not configured_selected:
+            self.show_toast("No configured devices selected", error=True)
+            return
+        
+        # Build list of device names for confirmation
+        device_list = []
+        for device in configured_selected:
+            name = f"{device.vendor_name or 'Unknown'} {device.product_name or 'Device'}"
+            vid_pid = f"[{device.vendor_id}:{device.product_id}]"
+            device_list.append(f"• {name} {vid_pid}")
+        
+        # Confirm action with device list
+        dialog = Adw.MessageDialog(transient_for=self)
+        dialog.set_heading("Remove udev rules?")
+        dialog.set_body_use_markup(True)
+        
+        body_text = f"This will <b>remove</b> udev rules for <b>{len(configured_selected)}</b> device(s):\n\n"
+        body_text += "\n".join(device_list[:10])
+        if len(device_list) > 10:
+            body_text += f"\n... and {len(device_list) - 10} more"
+        
+        dialog.set_body(body_text)
+        
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("remove", "Remove Rules")
+        dialog.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+        
+        dialog.connect("response", self.on_remove_confirmed, configured_selected)
+        dialog.present()
+    
+    def on_remove_confirmed(self, dialog, response, selected_devices):
+        """Handle remove confirmation dialog response"""
+        if response != "remove":
+            return
+        
+        self.set_loading(True)
+        self.progress_bar.set_text("Removing rules...")
+        
+        # Build device IDs
+        device_ids = []
+        for device in selected_devices:
+            if device.vendor_id and device.product_id:
+                device_ids.append(f"{device.vendor_id}:{device.product_id}")
+        
+        if not device_ids:
+            self.show_toast("No valid devices selected", error=True)
+            self.set_loading(False)
+            return
+        
+        print(f"[GUI] Removing rules for {len(device_ids)} device(s): {', '.join(device_ids)}")
+        
+        def remove_thread():
+            try:
+                cli_tool = self.find_cli_tool()
+                if not cli_tool:
+                    GLib.idle_add(self.show_toast, "Could not find udev-autoconfig CLI tool", True)
+                    GLib.idle_add(self.set_loading, False)
+                    return
+                
+                # Determine how to run the CLI tool
+                if os.geteuid() == 0:
+                    if cli_tool.endswith('.py'):
+                        cmd = [sys.executable, cli_tool, '--remove'] + device_ids
+                    else:
+                        cmd = [cli_tool, '--remove'] + device_ids
+                else:
+                    if cli_tool.endswith('.py'):
+                        cmd = ['pkexec', sys.executable, cli_tool, '--remove'] + device_ids
+                    else:
+                        cmd = ['pkexec', cli_tool, '--remove'] + device_ids
+                
+                print(f"[GUI] Running command: {' '.join(cmd)}")
+                
+                GLib.idle_add(self.progress_bar.set_text, "Requesting admin privileges...")
+                GLib.idle_add(self.progress_bar.set_fraction, 0.2)
+                
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                
+                if result.stdout:
+                    print(f"[CLI stdout] {result.stdout}")
+                if result.stderr:
+                    print(f"[CLI stderr] {result.stderr}")
+                
+                GLib.idle_add(self.progress_bar.set_fraction, 1.0)
+                
+                if result.returncode == 0:
+                    GLib.idle_add(self.show_toast, f"Rules removed for {len(device_ids)} device(s)!")
+                    GLib.idle_add(self.load_devices)
+                elif result.returncode == 126:
+                    GLib.idle_add(self.show_toast, "Authentication cancelled", True)
+                else:
+                    error_msg = result.stderr.strip() if result.stderr else result.stdout.strip() if result.stdout else f"Exit code: {result.returncode}"
+                    GLib.idle_add(self.show_toast, f"Failed: {error_msg}", True)
+                
+            except FileNotFoundError:
+                GLib.idle_add(self.show_toast, "pkexec not found. Please install polkit.", True)
+            except Exception as e:
+                GLib.idle_add(self.show_toast, f"Error: {e}", True)
+            finally:
+                GLib.idle_add(self.set_loading, False)
+        
+        thread = threading.Thread(target=remove_thread)
+        thread.daemon = True
+        thread.start()
+    
     def set_loading(self, loading: bool):
         """Set loading state"""
         self.refresh_button.set_sensitive(not loading)
-        self.apply_button.set_sensitive(not loading and os.geteuid() == 0)
+        self.apply_button.set_sensitive(not loading)
+        self.remove_button.set_sensitive(not loading)
         self.dry_run_button.set_sensitive(not loading)
         self.progress_bar.set_visible(loading)
         if not loading:
@@ -649,7 +921,7 @@ class UdevConfigApp(Adw.Application):
             developer_name="USB Device Auto-Config",
             version="1.0.0",
             developers=["USB Device Auto-Config Contributors"],
-            copyright="© 2024 USB Device Auto-Config",
+            copyright="© 2025 USB Device Auto-Config",
             website="https://github.com/RitzDaCat/udev-autoconfig",
             issue_url="https://github.com/RitzDaCat/udev-autoconfig/issues",
             license_type=Gtk.License.MIT_X11,

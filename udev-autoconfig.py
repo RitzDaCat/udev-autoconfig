@@ -3,10 +3,9 @@
 import os
 import sys
 import subprocess
-import json
 import argparse
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 import re
 
 # ANSI color codes for terminal output
@@ -155,7 +154,7 @@ class UdevRuleGenerator:
         
         for rule_file in self.rules_dir.glob("*.rules"):
             try:
-                with open(rule_file, 'r') as f:
+                with open(rule_file, 'r', encoding='utf-8', errors='replace') as f:
                     content = f.read()
                     # Look for complete vendor:product pairs in the same rule line
                     for line in content.split('\n'):
@@ -170,8 +169,8 @@ class UdevRuleGenerator:
                                 if vid not in existing:
                                     existing[vid] = set()
                                 existing[vid].add(pid)
-            except:
-                pass
+            except (IOError, OSError) as e:
+                print(f"Warning: Could not parse {rule_file}: {e}", file=sys.stderr)
         
         # Convert sets back to lists
         for vid in existing:
@@ -283,6 +282,88 @@ class UdevRuleGenerator:
                 saved_files[vendor_name] = [str(filepath)]
         
         return saved_files
+    
+    def remove_rules(self, device_ids: List[str], dry_run: bool = False) -> Dict[str, int]:
+        """
+        Remove rules for specific devices by vendor:product ID.
+        Returns dict of {filepath: lines_removed}
+        """
+        # Parse device IDs into (vid, pid) tuples
+        targets = set()
+        for dev_id in device_ids:
+            if ':' in dev_id:
+                vid, pid = dev_id.lower().split(':', 1)
+                targets.add((vid, pid))
+        
+        if not targets:
+            return {}
+        
+        removed_from = {}
+        
+        for rule_file in self.rules_dir.glob("*.rules"):
+            try:
+                with open(rule_file, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                
+                new_lines = []
+                removed_count = 0
+                skip_next_empty = False
+                
+                for line in lines:
+                    should_remove = False
+                    
+                    # Check if this line contains a rule for any target device
+                    if 'idVendor' in line and 'idProduct' in line:
+                        vendor_match = re.search(r'idVendor[}=]+="?([0-9a-fA-F]+)"?', line)
+                        product_match = re.search(r'idProduct[}=]+="?([0-9a-fA-F]+)"?', line)
+                        
+                        if vendor_match and product_match:
+                            vid = vendor_match.group(1).lower()
+                            pid = product_match.group(1).lower()
+                            if (vid, pid) in targets:
+                                should_remove = True
+                                removed_count += 1
+                    
+                    # Also remove comment lines that reference the device (snap/flatpak support comments)
+                    if not should_remove and line.strip().startswith('#'):
+                        # Check if next non-empty line would be removed
+                        # For now, just keep comments unless they're orphaned
+                        pass
+                    
+                    if should_remove:
+                        if dry_run:
+                            print(f"{Colors.YELLOW}Would remove:{Colors.RESET} {line.rstrip()}")
+                        skip_next_empty = True
+                    else:
+                        # Skip empty lines that follow removed rules
+                        if skip_next_empty and line.strip() == '':
+                            skip_next_empty = False
+                            continue
+                        skip_next_empty = False
+                        new_lines.append(line)
+                
+                if removed_count > 0:
+                    removed_from[str(rule_file)] = removed_count
+                    
+                    if not dry_run:
+                        # Check if file would be empty (only comments/whitespace)
+                        has_rules = any(l.strip() and not l.strip().startswith('#') for l in new_lines)
+                        
+                        if has_rules:
+                            with open(rule_file, 'w', encoding='utf-8') as f:
+                                f.writelines(new_lines)
+                            print(f"{Colors.GREEN}✓{Colors.RESET} Removed {removed_count} rule(s) from {Colors.BOLD}{rule_file}{Colors.RESET}")
+                        else:
+                            # File is now empty, delete it
+                            rule_file.unlink()
+                            print(f"{Colors.GREEN}✓{Colors.RESET} Deleted empty rules file: {Colors.BOLD}{rule_file}{Colors.RESET}")
+                    else:
+                        print(f"{Colors.YELLOW}Would remove {removed_count} rule(s) from {rule_file}{Colors.RESET}")
+                        
+            except (IOError, OSError) as e:
+                print(f"{Colors.RED}Error processing {rule_file}: {e}{Colors.RESET}", file=sys.stderr)
+        
+        return removed_from
 
 
 class InteractiveUI:
@@ -355,7 +436,9 @@ class InteractiveUI:
         
         new_devices = []
         for device in devices:
-            if device.vendor_id not in existing or device.product_id not in existing.get(device.vendor_id, []):
+            vid = device.vendor_id.lower() if device.vendor_id else None
+            pid = device.product_id.lower() if device.product_id else None
+            if vid not in existing or pid not in existing.get(vid, []):
                 new_devices.append(device)
         
         if not new_devices:
@@ -417,6 +500,10 @@ Examples:
                        help='Show what rules would be created without writing files')
     parser.add_argument('--auto', action='store_true',
                        help='Automatically create rules for all devices without existing rules')
+    parser.add_argument('--devices', type=str, nargs='+', metavar='VID:PID',
+                       help='Create rules for specific devices by vendor:product ID (e.g., 046d:c085)')
+    parser.add_argument('--remove', type=str, nargs='+', metavar='VID:PID',
+                       help='Remove rules for specific devices by vendor:product ID')
     parser.add_argument('--subsystem', type=str,
                        help='Filter devices by subsystem (e.g., usb, hidraw, input)')
     
@@ -429,7 +516,20 @@ Examples:
     
     generator = UdevRuleGenerator()
     
-    if args.list:
+    if args.remove:
+        # Remove rules for specific devices
+        print(f"Removing rules for {len(args.remove)} device(s)...")
+        removed = generator.remove_rules(args.remove, dry_run=args.dry_run)
+        if removed and not args.dry_run:
+            try:
+                subprocess.run(['udevadm', 'control', '--reload-rules'], check=True)
+                subprocess.run(['udevadm', 'trigger'], check=True)
+                print(f"{Colors.GREEN}{Colors.BOLD}✓ Rules reloaded!{Colors.RESET}")
+            except subprocess.CalledProcessError:
+                print("\nRun 'sudo udevadm control --reload-rules && sudo udevadm trigger' to apply.")
+        elif not removed:
+            print(f"{Colors.YELLOW}No matching rules found to remove.{Colors.RESET}")
+    elif args.list:
         devices = generator.get_usb_devices() if not args.subsystem else generator.scan_devices(args.subsystem)
         if devices:
             print("\n=== USB Devices ===\n")
@@ -443,17 +543,49 @@ Examples:
                 print()
         else:
             print("No USB devices found.")
+    elif args.devices:
+        # Create rules for specific devices by vendor:product ID
+        devices = generator.get_usb_devices()
+        requested_ids = set()
+        for dev_id in args.devices:
+            if ':' in dev_id:
+                vid, pid = dev_id.lower().split(':', 1)
+                requested_ids.add((vid, pid))
+            else:
+                print(f"{Colors.YELLOW}⚠ Invalid device ID format '{dev_id}', expected VID:PID{Colors.RESET}")
+        
+        selected_devices = [d for d in devices if d.vendor_id and d.product_id and
+                          (d.vendor_id.lower(), d.product_id.lower()) in requested_ids]
+        
+        if selected_devices:
+            print(f"Creating rules for {len(selected_devices)} device(s)...")
+            saved = generator.save_rules(selected_devices, dry_run=args.dry_run)
+            if not args.dry_run and saved:
+                try:
+                    subprocess.run(['udevadm', 'control', '--reload-rules'], check=True)
+                    subprocess.run(['udevadm', 'trigger'], check=True)
+                    print(f"{Colors.GREEN}{Colors.BOLD}✓ Rules applied!{Colors.RESET}")
+                except subprocess.CalledProcessError:
+                    print("\nRun 'sudo udevadm control --reload-rules && sudo udevadm trigger' to apply.")
+        else:
+            print(f"{Colors.YELLOW}No matching devices found for the specified IDs.{Colors.RESET}")
     elif args.auto:
         devices = generator.get_usb_devices()
         existing = generator.get_existing_rules()
-        new_devices = [d for d in devices if d.vendor_id not in existing or 
-                       d.product_id not in existing.get(d.vendor_id, [])]
+        new_devices = [d for d in devices if 
+                       (d.vendor_id.lower() if d.vendor_id else None) not in existing or 
+                       (d.product_id.lower() if d.product_id else None) not in existing.get(d.vendor_id.lower() if d.vendor_id else '', [])]
         
         if new_devices:
             print(f"Creating rules for {len(new_devices)} device(s)...")
-            generator.save_rules(new_devices, dry_run=args.dry_run)
-            if not args.dry_run:
-                print("\nRun 'sudo udevadm control --reload-rules && sudo udevadm trigger' to apply.")
+            saved = generator.save_rules(new_devices, dry_run=args.dry_run)
+            if not args.dry_run and saved:
+                try:
+                    subprocess.run(['udevadm', 'control', '--reload-rules'], check=True)
+                    subprocess.run(['udevadm', 'trigger'], check=True)
+                    print(f"{Colors.GREEN}{Colors.BOLD}✓ Rules applied!{Colors.RESET}")
+                except subprocess.CalledProcessError:
+                    print("\nRun 'sudo udevadm control --reload-rules && sudo udevadm trigger' to apply.")
         else:
             print("No new devices found that need rules.")
     else:
