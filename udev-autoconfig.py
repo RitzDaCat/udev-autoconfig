@@ -4,9 +4,97 @@ import os
 import sys
 import subprocess
 import argparse
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Dict, Optional
 import re
+
+
+# Device type to primary group mapping
+TYPE_TO_GROUP = {
+    "keyboard": "input",
+    "mouse": "input",
+    "controller": "input",
+    "serial": "dialout",
+    "storage": "disk",
+    "audio": "audio",
+    "network": "netdev",
+    "generic": "input",
+}
+
+# Device presets with descriptions for GUI selection
+# Each preset configures DeviceProfile with appropriate settings
+DEVICE_PRESETS = {
+    "controller": {
+        "name": "🎮 Game Controller",
+        "description": "Xbox, PlayStation, 8BitDo controllers - Full input support + no sleep",
+        "settings": {"device_type": "controller", "webhid_access": True, "raw_usb_access": False},
+    },
+    "mouse": {
+        "name": "🖱️ Gaming Mouse (WebHID)",
+        "description": "Mice with web-based DPI/LOD config (VAXEE, Razer, etc.)",
+        "settings": {"device_type": "mouse", "webhid_access": True, "raw_usb_access": True},
+    },
+    "keyboard": {
+        "name": "⌨️ Custom Keyboard",
+        "description": "Wooting, QMK, VIA keyboards with firmware/config access",
+        "settings": {"device_type": "keyboard", "webhid_access": True, "raw_usb_access": True},
+    },
+    "serial": {
+        "name": "🔌 Serial Device",
+        "description": "Arduino, microcontrollers, debug adapters (ttyUSB/ttyACM)",
+        "settings": {"device_type": "serial", "serial_access": True, "webhid_access": False},
+    },
+    "storage": {
+        "name": "💾 Storage Device",
+        "description": "USB drives, card readers, external disks",
+        "settings": {"device_type": "storage", "webhid_access": False, "raw_usb_access": False},
+    },
+    "audio": {
+        "name": "🎧 Audio Interface",
+        "description": "DACs, mixers, audio interfaces (GoXLR, Focusrite, etc.)",
+        "settings": {"device_type": "audio", "webhid_access": True, "raw_usb_access": False},
+    },
+    "network": {
+        "name": "🌐 Network Adapter",
+        "description": "USB WiFi, Ethernet, mobile broadband adapters",
+        "settings": {"device_type": "network", "network_access": True, "webhid_access": False},
+    },
+    "generic": {
+        "name": "📦 Generic Device",
+        "description": "Default settings - basic WebHID access",
+        "settings": {"device_type": "generic", "webhid_access": True, "raw_usb_access": False},
+    },
+}
+
+
+@dataclass
+class DeviceProfile:
+    """Configuration profile for a USB device's udev rule generation."""
+    # Device type (affects GROUP assignment)
+    device_type: str = "generic"
+    
+    # Access toggles
+    webhid_access: bool = True       # Browser WebHID (TAG+=uaccess)
+    raw_usb_access: bool = False     # libusb userspace (MODE=0666)
+    serial_access: bool = False      # /dev/ttyUSB*, ttyACM* (GROUP=dialout)
+    network_access: bool = False     # USB network adapters (GROUP=netdev)
+    
+    # Browser support toggles
+    snap_chromium: bool = True
+    flatpak_browsers: bool = True
+    
+    def get_group(self) -> str:
+        """Get the primary group based on device type and access toggles."""
+        if self.serial_access:
+            return "dialout"
+        if self.network_access:
+            return "netdev"
+        return TYPE_TO_GROUP.get(self.device_type, "input")
+    
+    def get_mode(self) -> str:
+        """Get file mode based on access requirements."""
+        return "0666" if self.raw_usb_access else "0660"
 
 # ANSI color codes for terminal output
 class Colors:
@@ -37,6 +125,29 @@ class Colors:
 # Disable colors if not in a terminal
 if not sys.stdout.isatty():
     Colors.disable()
+
+# Known device database for automatic update mode detection
+# Structure: vendor_id -> {
+#   "name": "Vendor Name",
+#   "update_modes": { product_id: [update_mode_pids] },
+#   "vendor_only": True/False (if True, also generate vendor-wide rules)
+# }
+KNOWN_DEVICES = {
+    "03eb": {
+        "name": "Wooting (Legacy)",
+        "update_modes": {
+            "ff01": ["2402"],  # Wooting One Legacy -> update mode
+            "ff02": ["2403"],  # Wooting Two Legacy -> update mode
+        },
+        "vendor_only": False,
+    },
+    "31e3": {
+        "name": "Wooting",
+        "update_modes": {},
+        "vendor_only": True,  # Generic Wootings - match all products
+    },
+}
+
 
 class UdevDevice:
     def __init__(self, device_path: str):
@@ -178,25 +289,72 @@ class UdevRuleGenerator:
         
         return existing
     
-    def generate_rule(self, device: UdevDevice, include_snap: bool = True) -> str:
+    def generate_rule(self, device: UdevDevice, profile: DeviceProfile = None, include_snap: bool = True, extra_product_ids: List[str] = None) -> str:
         rules = []
         
-        # Use MODE:= for assignment and include GROUP and TAG
-        mode = "0660"
-        group = "input"
+        # Use profile settings or defaults
+        if profile is None:
+            profile = DeviceProfile()
+        
+        mode = profile.get_mode()
+        group = profile.get_group()
+        include_snap = profile.snap_chromium if profile else include_snap
+        include_flatpak = profile.flatpak_browsers if profile else True
+        include_webhid = profile.webhid_access if profile else True
+        
+        vid = device.vendor_id.lower() if device.vendor_id else ""
+        pid = device.product_id.lower() if device.product_id else ""
+        
+        # Auto-lookup update modes from KNOWN_DEVICES database
+        all_extra_pids = list(extra_product_ids) if extra_product_ids else []
+        if vid in KNOWN_DEVICES:
+            device_info = KNOWN_DEVICES[vid]
+            if pid in device_info.get("update_modes", {}):
+                for update_pid in device_info["update_modes"][pid]:
+                    if update_pid not in all_extra_pids:
+                        all_extra_pids.append(update_pid)
         
         comment = f" # {device.vendor_name} {device.product_name}" if device.product_name else ""
+        type_comment = f" [{profile.device_type}]" if profile.device_type != "generic" else ""
+        comment = comment + type_comment
         
         # Main hidraw rule (most important for WebHID)
-        rule = f'SUBSYSTEM=="hidraw", ATTRS{{idVendor}}=="{device.vendor_id}", ATTRS{{idProduct}}=="{device.product_id}", MODE:="{mode}", GROUP="{group}", TAG+="uaccess"'
+        uaccess_tag = ', TAG+="uaccess"' if include_webhid else ''
+        rule = f'SUBSYSTEM=="hidraw", ATTRS{{idVendor}}=="{device.vendor_id}", ATTRS{{idProduct}}=="{device.product_id}", MODE:="{mode}", GROUP="{group}"{uaccess_tag}'
         rules.append(rule + comment)
         
         # USB subsystem rule
-        rule = f'SUBSYSTEM=="usb", ATTRS{{idVendor}}=="{device.vendor_id}", ATTRS{{idProduct}}=="{device.product_id}", MODE:="{mode}", GROUP="{group}", TAG+="uaccess"'
+        rule = f'SUBSYSTEM=="usb", ATTRS{{idVendor}}=="{device.vendor_id}", ATTRS{{idProduct}}=="{device.product_id}", MODE:="{mode}", GROUP="{group}"{uaccess_tag}'
         rules.append(rule + comment)
         
+        # Input subsystem rule (for controller buttons, thumbsticks, evdev)
+        # This is essential for gamepads to work in Steam/games
+        rule = f'SUBSYSTEM=="input", ATTRS{{idVendor}}=="{device.vendor_id}", ATTRS{{idProduct}}=="{device.product_id}", MODE:="{mode}", GROUP="{group}"{uaccess_tag}'
+        rules.append(rule + comment)
+        
+        # Power supply rule (for controllers with charging capability)
+        rule = f'KERNEL=="hidraw*", ATTRS{{idVendor}}=="{device.vendor_id}", ATTRS{{idProduct}}=="{device.product_id}", MODE:="{mode}", GROUP="{group}"'
+        rules.append(rule + comment)
+        
+        # Bluetooth subsystem (for wireless controllers and Bluetooth adapters)
+        rule = f'SUBSYSTEM=="bluetooth", ATTRS{{idVendor}}=="{device.vendor_id}", ATTRS{{idProduct}}=="{device.product_id}", MODE:="{mode}", GROUP="{group}"{uaccess_tag}'
+        rules.append(rule + comment)
+        
+        # USB power management - disable autosuspend to prevent wireless controllers from sleeping
+        rules.append("")
+        rules.append(f"# Disable USB autosuspend (prevents controller disconnect during idle){comment}")
+        rule = f'ACTION=="add", SUBSYSTEM=="usb", ATTRS{{idVendor}}=="{device.vendor_id}", ATTRS{{idProduct}}=="{device.product_id}", ATTR{{power/autosuspend}}="-1"'
+        rules.append(rule)
+        
+        # Add serial port rules if serial access is enabled
+        if profile.serial_access:
+            rules.append("")
+            rules.append(f"# Serial port access (ttyUSB/ttyACM){comment}")
+            rule = f'SUBSYSTEM=="tty", ATTRS{{idVendor}}=="{device.vendor_id}", ATTRS{{idProduct}}=="{device.product_id}", MODE:="{mode}", GROUP="dialout"'
+            rules.append(rule)
+        
         # Add snap Chromium support if requested (for Ubuntu/snap users)
-        if include_snap:
+        if include_snap and include_webhid:
             rules.append("")
             rules.append(f"# Support for snap Chromium (Ubuntu){comment}")
             rule = f'SUBSYSTEM=="hidraw", ATTRS{{idVendor}}=="{device.vendor_id}", ATTRS{{idProduct}}=="{device.product_id}", TAG+="snap_chromium_chromedriver"'
@@ -205,15 +363,63 @@ class UdevRuleGenerator:
             rules.append(rule)
         
         # Add flatpak Chrome/Chromium support
-        rules.append("")
-        rules.append(f"# Support for Flatpak browsers{comment}")
-        rule = f'SUBSYSTEM=="hidraw", ATTRS{{idVendor}}=="{device.vendor_id}", ATTRS{{idProduct}}=="{device.product_id}", TAG+="uaccess", TAG+="seat"'
-        rules.append(rule)
+        if include_flatpak and include_webhid:
+            rules.append("")
+            rules.append(f"# Support for Flatpak browsers{comment}")
+            rule = f'SUBSYSTEM=="hidraw", ATTRS{{idVendor}}=="{device.vendor_id}", ATTRS{{idProduct}}=="{device.product_id}", TAG+="uaccess", TAG+="seat"'
+            rules.append(rule)
+        
+        # Add rules for extra product IDs (firmware update/DFU modes)
+        if all_extra_pids:
+            for extra_pid in all_extra_pids:
+                rules.append("")
+                rules.append(f"# Update/DFU mode ({device.vendor_id}:{extra_pid})")
+                rule = f'SUBSYSTEM=="hidraw", ATTRS{{idVendor}}=="{device.vendor_id}", ATTRS{{idProduct}}=="{extra_pid}", MODE:="{mode}", GROUP="{group}"{uaccess_tag}'
+                rules.append(rule)
+                rule = f'SUBSYSTEM=="usb", ATTRS{{idVendor}}=="{device.vendor_id}", ATTRS{{idProduct}}=="{extra_pid}", MODE:="{mode}", GROUP="{group}"{uaccess_tag}'
+                rules.append(rule)
+                
+                if include_snap and include_webhid:
+                    rules.append(f"# Update mode snap Chromium support")
+                    rule = f'SUBSYSTEM=="hidraw", ATTRS{{idVendor}}=="{device.vendor_id}", ATTRS{{idProduct}}=="{extra_pid}", TAG+="snap_chromium_chromedriver"'
+                    rules.append(rule)
+                    rule = f'SUBSYSTEM=="hidraw", ATTRS{{idVendor}}=="{device.vendor_id}", ATTRS{{idProduct}}=="{extra_pid}", TAG+="snap_chromium_chromium"'
+                    rules.append(rule)
         
         return '\n'.join(rules)
     
-    def save_rules(self, devices: List[UdevDevice], dry_run: bool = False) -> Dict[str, List[str]]:
+    def generate_vendor_rule(self, vendor_id: str, vendor_name: str = None, include_snap: bool = True) -> str:
+        """Generate rules that match all products from a vendor (no product ID filter)."""
+        rules = []
+        
+        mode = "0660"
+        group = "input"
+        
+        display_name = vendor_name or vendor_id
+        comment = f" # {display_name} (all devices)"
+        
+        # Generic vendor rules (no product ID)
+        rules.append(f"# Generic {display_name} devices")
+        rule = f'SUBSYSTEM=="hidraw", ATTRS{{idVendor}}=="{vendor_id}", MODE:="{mode}", GROUP="{group}", TAG+="uaccess"'
+        rules.append(rule + comment)
+        
+        rule = f'SUBSYSTEM=="usb", ATTRS{{idVendor}}=="{vendor_id}", MODE:="{mode}", GROUP="{group}", TAG+="uaccess"'
+        rules.append(rule + comment)
+        
+        if include_snap:
+            rules.append("")
+            rules.append(f"# Snap Chromium support for {display_name}")
+            rule = f'SUBSYSTEM=="hidraw", ATTRS{{idVendor}}=="{vendor_id}", TAG+="snap_chromium_chromedriver"'
+            rules.append(rule)
+            rule = f'SUBSYSTEM=="hidraw", ATTRS{{idVendor}}=="{vendor_id}", TAG+="snap_chromium_chromium"'
+            rules.append(rule)
+        
+        return '\n'.join(rules)
+
+    
+    def save_rules(self, devices: List[UdevDevice], dry_run: bool = False, extra_product_ids: List[str] = None) -> Dict[str, List[str]]:
         rules_by_vendor = {}
+        vendors_seen = set()  # Track vendor IDs for vendor-only rules
         
         for device in devices:
             vendor_name = (device.vendor_name or device.vendor_id).lower()
@@ -222,8 +428,25 @@ class UdevRuleGenerator:
             if vendor_name not in rules_by_vendor:
                 rules_by_vendor[vendor_name] = []
             
-            rule = self.generate_rule(device)
+            rule = self.generate_rule(device, extra_product_ids=extra_product_ids)
             rules_by_vendor[vendor_name].append(rule)
+            
+            # Track vendor IDs for vendor-only rules
+            if device.vendor_id:
+                vendors_seen.add(device.vendor_id.lower())
+        
+        # Add vendor-only rules for known vendors that require them
+        for vid in vendors_seen:
+            if vid in KNOWN_DEVICES and KNOWN_DEVICES[vid].get("vendor_only", False):
+                vendor_info = KNOWN_DEVICES[vid]
+                vendor_name = vendor_info.get("name", vid).lower()
+                vendor_name = re.sub(r'[^a-z0-9]+', '-', vendor_name)
+                
+                if vendor_name not in rules_by_vendor:
+                    rules_by_vendor[vendor_name] = []
+                
+                vendor_rule = self.generate_vendor_rule(vid, vendor_info.get("name"))
+                rules_by_vendor[vendor_name].append(vendor_rule)
         
         saved_files = {}
         
@@ -366,6 +589,273 @@ class UdevRuleGenerator:
         return removed_from
 
 
+@dataclass
+class RuleEntry:
+    """Represents a single parsed udev rule."""
+    filepath: Path
+    line_number: int
+    vendor_id: str
+    product_id: Optional[str]  # None for vendor-only rules
+    mode: Optional[str]
+    group: Optional[str]
+    raw_line: str
+
+
+class RulesAuditor:
+    """Audits /etc/udev/rules.d/ for duplicates, conflicts, and issues."""
+    
+    def __init__(self, rules_dir: Path = None):
+        self.rules_dir = rules_dir or Path("/etc/udev/rules.d")
+        self.entries: List[RuleEntry] = []
+        self.connected_devices: set = set()  # (vid, pid) tuples
+        
+    def scan_connected_devices(self) -> set:
+        """Get set of currently connected device VID:PID pairs."""
+        try:
+            result = subprocess.run(
+                ['udevadm', 'info', '--export-db'],
+                capture_output=True, text=True, check=True
+            )
+            devices = set()
+            current_vid = None
+            current_pid = None
+            
+            for line in result.stdout.split('\n'):
+                if line.startswith('E: ID_VENDOR_ID='):
+                    current_vid = line.split('=', 1)[1].lower()
+                elif line.startswith('E: ID_MODEL_ID='):
+                    current_pid = line.split('=', 1)[1].lower()
+                elif line.startswith('P: ') and current_vid and current_pid:
+                    devices.add((current_vid, current_pid))
+                    current_vid = current_pid = None
+                    
+            self.connected_devices = devices
+            return devices
+        except subprocess.CalledProcessError:
+            return set()
+    
+    def parse_rules(self) -> List[RuleEntry]:
+        """Parse all rule files and extract device rules."""
+        self.entries = []
+        
+        if not self.rules_dir.exists():
+            return self.entries
+        
+        for rule_file in sorted(self.rules_dir.glob("*.rules")):
+            try:
+                with open(rule_file, 'r', encoding='utf-8', errors='replace') as f:
+                    for line_num, line in enumerate(f, 1):
+                        line = line.strip()
+                        if not line or line.startswith('#'):
+                            continue
+                        
+                        # Extract vendor ID
+                        vendor_match = re.search(
+                            r'(?:ATTRS?\{)?idVendor[}=]+="?([0-9a-fA-F]+)"?', line
+                        )
+                        if not vendor_match:
+                            continue
+                        
+                        vid = vendor_match.group(1).lower()
+                        
+                        # Extract product ID (may not exist for vendor-only rules)
+                        product_match = re.search(
+                            r'(?:ATTRS?\{)?idProduct[}=]+="?([0-9a-fA-F]+)"?', line
+                        )
+                        pid = product_match.group(1).lower() if product_match else None
+                        
+                        # Extract MODE
+                        mode_match = re.search(r'MODE:?="?([0-9]+)"?', line)
+                        mode = mode_match.group(1) if mode_match else None
+                        
+                        # Extract GROUP
+                        group_match = re.search(r'GROUP="?([a-zA-Z0-9_-]+)"?', line)
+                        group = group_match.group(1) if group_match else None
+                        
+                        self.entries.append(RuleEntry(
+                            filepath=rule_file,
+                            line_number=line_num,
+                            vendor_id=vid,
+                            product_id=pid,
+                            mode=mode,
+                            group=group,
+                            raw_line=line
+                        ))
+            except (IOError, OSError):
+                continue
+        
+        return self.entries
+    
+    def find_duplicates(self) -> Dict[str, List[RuleEntry]]:
+        """Find duplicate VID:PID rules across files."""
+        by_device: Dict[str, List[RuleEntry]] = {}
+        
+        for entry in self.entries:
+            if entry.product_id:
+                key = f"{entry.vendor_id}:{entry.product_id}"
+                if key not in by_device:
+                    by_device[key] = []
+                by_device[key].append(entry)
+        
+        # Return only those with duplicates (more than one file)
+        duplicates = {}
+        for key, entries in by_device.items():
+            unique_files = set(str(e.filepath) for e in entries)
+            if len(unique_files) > 1:
+                duplicates[key] = entries
+        
+        return duplicates
+    
+    def find_conflicts(self) -> Dict[str, List[RuleEntry]]:
+        """Find VID:PID rules with conflicting MODE or GROUP."""
+        by_device: Dict[str, List[RuleEntry]] = {}
+        
+        for entry in self.entries:
+            if entry.product_id and (entry.mode or entry.group):
+                key = f"{entry.vendor_id}:{entry.product_id}"
+                if key not in by_device:
+                    by_device[key] = []
+                by_device[key].append(entry)
+        
+        conflicts = {}
+        for key, entries in by_device.items():
+            modes = set(e.mode for e in entries if e.mode)
+            groups = set(e.group for e in entries if e.group)
+            if len(modes) > 1 or len(groups) > 1:
+                conflicts[key] = entries
+        
+        return conflicts
+    
+    def find_stale(self) -> List[RuleEntry]:
+        """Find rules for devices not currently connected."""
+        if not self.connected_devices:
+            self.scan_connected_devices()
+        
+        stale = []
+        for entry in self.entries:
+            if entry.product_id:
+                device_key = (entry.vendor_id, entry.product_id)
+                if device_key not in self.connected_devices:
+                    stale.append(entry)
+        
+        return stale
+    
+    def find_overlaps(self) -> Dict[str, tuple]:
+        """Find vendor-only rules that overlap with specific product rules."""
+        vendor_only = {}  # vid -> RuleEntry
+        product_specific: Dict[str, List[RuleEntry]] = {}  # vid -> [entries with pid]
+        
+        for entry in self.entries:
+            if entry.product_id is None:
+                vendor_only[entry.vendor_id] = entry
+            else:
+                if entry.vendor_id not in product_specific:
+                    product_specific[entry.vendor_id] = []
+                product_specific[entry.vendor_id].append(entry)
+        
+        overlaps = {}
+        for vid, vendor_entry in vendor_only.items():
+            if vid in product_specific:
+                overlaps[vid] = (vendor_entry, product_specific[vid])
+        
+        return overlaps
+    
+    def audit(self, show_stale: bool = True, filter_query: str = None) -> None:
+        """Run full audit and print report."""
+        print(f"\n{Colors.BOLD}{Colors.CYAN}═══════════════════════════════════════{Colors.RESET}")
+        print(f"{Colors.BOLD}{Colors.CYAN}        Rules Audit Report             {Colors.RESET}")
+        print(f"{Colors.BOLD}{Colors.CYAN}═══════════════════════════════════════{Colors.RESET}\n")
+        
+        if filter_query:
+            print(f"{Colors.CYAN}Filter: {Colors.BOLD}{filter_query}{Colors.RESET}\n")
+        
+        self.parse_rules()
+        if show_stale:
+            self.scan_connected_devices()
+        
+        # Filter entries if query provided
+        if filter_query:
+            query = filter_query.lower()
+            filtered_entries = []
+            for entry in self.entries:
+                device_id = f"{entry.vendor_id}:{entry.product_id}" if entry.product_id else entry.vendor_id
+                # Match by VID:PID or search in raw rule line
+                if query in device_id or query in entry.raw_line.lower():
+                    filtered_entries.append(entry)
+            self.entries = filtered_entries
+            
+            if not self.entries:
+                print(f"{Colors.YELLOW}No rules found matching '{filter_query}'{Colors.RESET}")
+                return
+        
+        issues_found = False
+        
+        # Duplicates
+        duplicates = self.find_duplicates()
+        if duplicates:
+            issues_found = True
+            for device_id, entries in duplicates.items():
+                print(f"{Colors.YELLOW}⚠ DUPLICATE:{Colors.RESET} {Colors.BOLD}{device_id}{Colors.RESET}")
+                for entry in entries:
+                    print(f"  → {Colors.DIM}{entry.filepath}:{entry.line_number}{Colors.RESET}")
+                print()
+        
+        # Conflicts
+        conflicts = self.find_conflicts()
+        if conflicts:
+            issues_found = True
+            for device_id, entries in conflicts.items():
+                print(f"{Colors.RED}✗ CONFLICT:{Colors.RESET} {Colors.BOLD}{device_id}{Colors.RESET}")
+                for entry in entries:
+                    mode_str = f'MODE="{entry.mode}"' if entry.mode else ""
+                    group_str = f'GROUP="{entry.group}"' if entry.group else ""
+                    print(f"  → {Colors.DIM}{entry.filepath.name}:{Colors.RESET} {mode_str} {group_str}")
+                print()
+        
+        # Stale rules
+        if show_stale:
+            stale = self.find_stale()
+            # Deduplicate by device ID for cleaner output
+            stale_devices = {}
+            for entry in stale:
+                key = f"{entry.vendor_id}:{entry.product_id}"
+                if key not in stale_devices:
+                    stale_devices[key] = entry
+            
+            if stale_devices:
+                issues_found = True
+                print(f"{Colors.DIM}ℹ STALE (disconnected devices):{Colors.RESET}")
+                for device_id, entry in list(stale_devices.items())[:10]:  # Limit to 10
+                    print(f"  → {device_id} in {entry.filepath.name}")
+                if len(stale_devices) > 10:
+                    print(f"  ... and {len(stale_devices) - 10} more")
+                print()
+        
+        # Overlaps
+        overlaps = self.find_overlaps()
+        if overlaps:
+            issues_found = True
+            for vid, (vendor_entry, product_entries) in overlaps.items():
+                print(f"{Colors.BLUE}ℹ OVERLAP:{Colors.RESET} Vendor rule {Colors.BOLD}{vid}{Colors.RESET} covers {len(product_entries)} specific product rules")
+                print(f"  → Vendor rule: {vendor_entry.filepath.name}:{vendor_entry.line_number}")
+                print()
+        
+        # If filtered and no issues, show matching rules
+        if filter_query and not issues_found:
+            print(f"{Colors.GREEN}✓ No issues found for '{filter_query}'{Colors.RESET}")
+            print(f"\n{Colors.BOLD}Matching rules:{Colors.RESET}")
+            for entry in self.entries[:20]:
+                device_id = f"{entry.vendor_id}:{entry.product_id}" if entry.product_id else entry.vendor_id
+                print(f"  → {device_id} in {entry.filepath.name}:{entry.line_number}")
+            if len(self.entries) > 20:
+                print(f"  ... and {len(self.entries) - 20} more")
+        elif not issues_found:
+            print(f"{Colors.GREEN}✓ No issues found!{Colors.RESET}")
+        
+        # Summary
+        print(f"\n{Colors.DIM}Scanned {len(list(self.rules_dir.glob('*.rules')))} rule files, {len(self.entries)} rules {'matched' if filter_query else 'total'}.{Colors.RESET}")
+
+
 class InteractiveUI:
     def __init__(self, generator: UdevRuleGenerator):
         self.generator = generator
@@ -487,10 +977,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s                    # Interactive mode
-  %(prog)s --list             # List all USB devices
-  %(prog)s --dry-run          # Show what would be created
-  %(prog)s --auto             # Create rules for all new devices
+  %(prog)s                              # Interactive mode
+  %(prog)s --list                       # List all USB devices
+  %(prog)s --dry-run                    # Show what would be created
+  %(prog)s --auto                       # Create rules for all new devices
+  %(prog)s --devices 03eb:ff01 --update-ids 2402  # Include firmware update mode
+  %(prog)s --vendor-only 31e3           # Rules for all devices from vendor
         """
     )
     
@@ -502,17 +994,59 @@ Examples:
                        help='Automatically create rules for all devices without existing rules')
     parser.add_argument('--devices', type=str, nargs='+', metavar='VID:PID',
                        help='Create rules for specific devices by vendor:product ID (e.g., 046d:c085)')
+    parser.add_argument('--update-ids', type=str, nargs='+', metavar='PID',
+                       help='Additional product IDs for firmware update modes (e.g., 2402 2403). Used with --devices.')
+    parser.add_argument('--vendor-only', type=str, nargs='+', metavar='VID',
+                       help='Create rules matching ALL products from vendor IDs (e.g., 31e3). Useful for device families.')
     parser.add_argument('--remove', type=str, nargs='+', metavar='VID:PID',
                        help='Remove rules for specific devices by vendor:product ID')
     parser.add_argument('--subsystem', type=str,
                        help='Filter devices by subsystem (e.g., usb, hidraw, input)')
     
+    # Device type and access options
+    parser.add_argument('--type', type=str, choices=list(TYPE_TO_GROUP.keys()),
+                       default='generic', metavar='TYPE',
+                       help='Device type: keyboard, mouse, controller, serial, storage, audio, network, generic')
+    parser.add_argument('--raw-usb', action='store_true',
+                       help='Enable raw USB/libusb access (MODE=0666)')
+    parser.add_argument('--serial', action='store_true',
+                       help='Enable serial port access (GROUP=dialout)')
+    parser.add_argument('--network', action='store_true',
+                       help='Enable network adapter access (GROUP=netdev)')
+    parser.add_argument('--no-webhid', action='store_true',
+                       help='Disable WebHID browser tags (TAG+=uaccess)')
+    parser.add_argument('--no-snap', action='store_true',
+                       help='Disable snap Chromium support')
+    parser.add_argument('--no-flatpak', action='store_true',
+                       help='Disable flatpak browser support')
+    
+    # Audit options
+    parser.add_argument('--audit', action='store_true',
+                       help='Scan /etc/udev/rules.d/ for duplicates, conflicts, and issues')
+    parser.add_argument('--no-stale', action='store_true',
+                       help='Skip stale rule detection during audit (faster)')
+    parser.add_argument('--filter', type=str, metavar='QUERY',
+                       help='Filter audit results by device name or VID:PID (e.g., "xbox" or "045e:028e")')
+    parser.add_argument('--show', type=str, metavar='VID:PID',
+                       help='Show all rules for a specific device by VID:PID (e.g., 045e:028e for Xbox controller)')
+    
     args = parser.parse_args()
     
-    if os.geteuid() != 0 and not args.list and not args.dry_run:
+    if os.geteuid() != 0 and not args.list and not args.dry_run and not args.audit and not args.show:
         print("Error: This script must be run with sudo to create udev rules.")
         print("You can use --dry-run to see what would be created without sudo.")
         sys.exit(1)
+    
+    # Build device profile from CLI args
+    profile = DeviceProfile(
+        device_type=args.type,
+        webhid_access=not args.no_webhid,
+        raw_usb_access=args.raw_usb,
+        serial_access=args.serial,
+        network_access=args.network,
+        snap_chromium=not args.no_snap,
+        flatpak_browsers=not args.no_flatpak
+    )
     
     generator = UdevRuleGenerator()
     
@@ -529,6 +1063,30 @@ Examples:
                 print("\nRun 'sudo udevadm control --reload-rules && sudo udevadm trigger' to apply.")
         elif not removed:
             print(f"{Colors.YELLOW}No matching rules found to remove.{Colors.RESET}")
+    elif args.audit:
+        # Run rules audit
+        auditor = RulesAuditor()
+        auditor.audit(show_stale=not args.no_stale, filter_query=args.filter)
+    elif args.show:
+        # Show rules for a specific device
+        auditor = RulesAuditor()
+        auditor.parse_rules()
+        query = args.show.lower()
+        matching = [e for e in auditor.entries 
+                   if query in (f"{e.vendor_id}:{e.product_id}" if e.product_id else e.vendor_id)]
+        
+        if matching:
+            print(f"\n{Colors.BOLD}{Colors.CYAN}Rules for {args.show}:{Colors.RESET}\n")
+            for entry in matching:
+                print(f"  {Colors.GREEN}►{Colors.RESET} {Colors.BOLD}{entry.filepath.name}{Colors.RESET}:{entry.line_number}")
+                mode_str = f'MODE="{entry.mode}"' if entry.mode else ""
+                group_str = f'GROUP="{entry.group}"' if entry.group else ""
+                print(f"    {mode_str} {group_str}")
+                print(f"    {Colors.DIM}{entry.raw_line[:100]}{'...' if len(entry.raw_line) > 100 else ''}{Colors.RESET}")
+                print()
+        else:
+            print(f"{Colors.YELLOW}No rules found for {args.show}{Colors.RESET}")
+            print(f"{Colors.DIM}Use 'udev-autoconfig --list' to see connected devices{Colors.RESET}")
     elif args.list:
         devices = generator.get_usb_devices() if not args.subsystem else generator.scan_devices(args.subsystem)
         if devices:
@@ -543,6 +1101,37 @@ Examples:
                 print()
         else:
             print("No USB devices found.")
+    elif args.vendor_only:
+        # Create vendor-only rules (match all products from a vendor)
+        print(f"Creating vendor-only rules for {len(args.vendor_only)} vendor(s)...")
+        for vid in args.vendor_only:
+            vid = vid.lower()
+            print(f"\n{Colors.CYAN}Vendor: {vid}{Colors.RESET}")
+            rule = generator.generate_vendor_rule(vid)
+            
+            if args.dry_run:
+                print(f"{Colors.YELLOW}--- Would create rules for vendor {vid} ---{Colors.RESET}")
+                print(rule)
+            else:
+                vendor_name = f"vendor-{vid}"
+                filename = f"50-{vendor_name}.rules"
+                filepath = generator.rules_dir / filename
+                
+                content = f"# udev rules for vendor {vid} (all devices)\n"
+                content += f"# Generated by udev-autoconfig\n\n"
+                content += rule + '\n'
+                
+                with open(filepath, 'w') as f:
+                    f.write(content)
+                print(f"{Colors.GREEN}✓{Colors.RESET} Created: {Colors.BOLD}{filepath}{Colors.RESET}")
+        
+        if not args.dry_run:
+            try:
+                subprocess.run(['udevadm', 'control', '--reload-rules'], check=True)
+                subprocess.run(['udevadm', 'trigger'], check=True)
+                print(f"{Colors.GREEN}{Colors.BOLD}✓ Rules applied!{Colors.RESET}")
+            except subprocess.CalledProcessError:
+                print("\nRun 'sudo udevadm control --reload-rules && sudo udevadm trigger' to apply.")
     elif args.devices:
         # Create rules for specific devices by vendor:product ID
         devices = generator.get_usb_devices()
@@ -557,9 +1146,14 @@ Examples:
         selected_devices = [d for d in devices if d.vendor_id and d.product_id and
                           (d.vendor_id.lower(), d.product_id.lower()) in requested_ids]
         
+        # Get extra product IDs for update modes
+        extra_pids = args.update_ids if args.update_ids else None
+        if extra_pids:
+            print(f"{Colors.CYAN}Including update mode product IDs: {', '.join(extra_pids)}{Colors.RESET}")
+        
         if selected_devices:
             print(f"Creating rules for {len(selected_devices)} device(s)...")
-            saved = generator.save_rules(selected_devices, dry_run=args.dry_run)
+            saved = generator.save_rules(selected_devices, dry_run=args.dry_run, extra_product_ids=extra_pids)
             if not args.dry_run and saved:
                 try:
                     subprocess.run(['udevadm', 'control', '--reload-rules'], check=True)

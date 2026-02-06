@@ -67,6 +67,10 @@ def load_udev_module():
 udev_module = load_udev_module()
 UdevDevice = udev_module.UdevDevice
 UdevRuleGenerator = udev_module.UdevRuleGenerator
+RulesAuditor = udev_module.RulesAuditor
+RuleEntry = udev_module.RuleEntry
+DeviceProfile = udev_module.DeviceProfile
+DEVICE_PRESETS = udev_module.DEVICE_PRESETS
 
 class DeviceRow(Gtk.Box):
     """Custom widget for displaying a USB device in the list"""
@@ -114,6 +118,16 @@ class DeviceRow(Gtk.Box):
         
         info_box.append(details_box)
         self.append(info_box)
+        
+        # View Rules button
+        self.view_rules_button = Gtk.Button()
+        self.view_rules_button.set_icon_name("document-open-symbolic")
+        self.view_rules_button.set_tooltip_text("View all rules affecting this device")
+        self.view_rules_button.add_css_class("flat")
+        self.view_rules_button.set_valign(Gtk.Align.CENTER)
+        # Store device reference for the callback
+        self.view_rules_button.device = device
+        self.append(self.view_rules_button)
         
         # Status indicator
         status_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
@@ -316,6 +330,70 @@ class UdevConfigWindow(Adw.ApplicationWindow):
         self.notebook.append_page(unconfigured_box, Gtk.Label(label="Needs Configuration"))
         self.notebook.append_page(configured_box, Gtk.Label(label="Already Configured"))
         
+        # Tab 3: Rules Audit
+        audit_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        audit_box.set_margin_top(8)
+        audit_box.set_margin_bottom(8)
+        audit_box.set_margin_start(8)
+        audit_box.set_margin_end(8)
+        
+        # Audit header with scan button and filter
+        audit_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        audit_header.set_margin_bottom(8)
+        
+        audit_title = Gtk.Label()
+        audit_title.set_markup("<b>Rules Audit</b>")
+        audit_title.set_halign(Gtk.Align.START)
+        audit_header.append(audit_title)
+        
+        # Filter entry
+        self.audit_filter_entry = Gtk.Entry()
+        self.audit_filter_entry.set_placeholder_text("Filter by VID:PID or name (e.g., xbox, 045e)")
+        self.audit_filter_entry.set_hexpand(True)
+        audit_header.append(self.audit_filter_entry)
+        
+        # Scan button
+        self.scan_rules_button = Gtk.Button(label="Scan Rules")
+        self.scan_rules_button.connect("clicked", self.on_scan_rules_clicked)
+        self.scan_rules_button.add_css_class("suggested-action")
+        audit_header.append(self.scan_rules_button)
+        
+        # Copy to Clipboard button
+        self.copy_audit_button = Gtk.Button()
+        self.copy_audit_button.set_icon_name("edit-copy-symbolic")
+        self.copy_audit_button.set_tooltip_text("Copy results to clipboard for sharing")
+        self.copy_audit_button.connect("clicked", self.on_copy_audit_clicked)
+        self.copy_audit_button.add_css_class("flat")
+        self.copy_audit_button.set_sensitive(False)  # Disabled until scan runs
+        audit_header.append(self.copy_audit_button)
+        
+        # Store audit results as plain text for clipboard
+        self.audit_results_text = ""
+        
+        audit_box.append(audit_header)
+        
+        # Audit results scrolled window
+        audit_scrolled = Gtk.ScrolledWindow()
+        audit_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        audit_scrolled.set_vexpand(True)
+        audit_scrolled.set_min_content_height(300)
+        
+        # Audit results list
+        self.audit_results_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.audit_results_list.add_css_class("card")
+        
+        # Initial placeholder
+        audit_placeholder = Gtk.Label(label="Click 'Scan Rules' to check for duplicates, conflicts, and issues")
+        audit_placeholder.set_margin_top(32)
+        audit_placeholder.set_margin_bottom(32)
+        audit_placeholder.set_opacity(0.7)
+        self.audit_results_list.append(audit_placeholder)
+        
+        audit_scrolled.set_child(self.audit_results_list)
+        audit_box.append(audit_scrolled)
+        
+        self.notebook.append_page(audit_box, Gtk.Label(label="Rules Audit"))
+        
         content_box.append(self.notebook)
         
         # Progress bar
@@ -489,6 +567,7 @@ class UdevConfigWindow(Adw.ApplicationWindow):
         if unconfigured_devices:
             for i, (device, has_rule) in enumerate(unconfigured_devices):
                 row = DeviceRow(device, i, has_rule)
+                row.view_rules_button.connect("clicked", self.on_view_rules_clicked)
                 self.device_rows.append(row)
                 
                 if i > 0:
@@ -506,6 +585,7 @@ class UdevConfigWindow(Adw.ApplicationWindow):
         if configured_devices:
             for i, (device, has_rule) in enumerate(configured_devices):
                 row = DeviceRow(device, len(unconfigured_devices) + i, has_rule)
+                row.view_rules_button.connect("clicked", self.on_view_rules_clicked)
                 self.device_rows.append(row)
                 
                 if i > 0:
@@ -623,39 +703,245 @@ class UdevConfigWindow(Adw.ApplicationWindow):
         
         dialog.present()
     
+    def on_view_rules_clicked(self, button):
+        """Show all rules files affecting the device"""
+        device = button.device
+        if not device or not device.vendor_id or not device.product_id:
+            self.show_toast("Invalid device", error=True)
+            return
+        
+        vid = device.vendor_id.lower()
+        pid = device.product_id.lower()
+        device_id = f"{vid}:{pid}"
+        device_name = f"{device.vendor_name or 'Unknown'} {device.product_name or 'Device'}"
+        
+        # Use RulesAuditor to find all rules
+        auditor = RulesAuditor()
+        auditor.parse_rules()
+        
+        # Find matching entries
+        matching_entries = []
+        for entry in auditor.entries:
+            entry_vid = entry.vendor_id.lower() if entry.vendor_id else ""
+            entry_pid = entry.product_id.lower() if entry.product_id else ""
+            
+            # Match exact device OR vendor-only rules
+            if entry_vid == vid and (entry_pid == pid or not entry_pid):
+                matching_entries.append(entry)
+        
+        # Create dialog
+        dialog = Adw.MessageDialog(transient_for=self)
+        dialog.set_heading(f"Rules for {device_name}")
+        dialog.set_body_use_markup(True)
+        
+        if matching_entries:
+            # Group by file
+            files = {}
+            for entry in matching_entries:
+                fname = entry.filepath.name
+                if fname not in files:
+                    files[fname] = []
+                files[fname].append(entry)
+            
+            body_parts = [f"<b>Device:</b> <tt>{device_id}</tt>\n"]
+            body_parts.append(f"<b>Found {len(matching_entries)} rule(s) in {len(files)} file(s):</b>\n\n")
+            
+            for fname, entries in files.items():
+                body_parts.append(f"<b>📄 {fname}</b>\n")
+                for entry in entries[:5]:  # Limit per file
+                    mode_str = f'MODE="{entry.mode}"' if entry.mode else ""
+                    group_str = f'GROUP="{entry.group}"' if entry.group else ""
+                    line_info = f"Line {entry.line_number}: {mode_str} {group_str}"
+                    body_parts.append(f"  <tt>{GLib.markup_escape_text(line_info)}</tt>\n")
+                if len(entries) > 5:
+                    body_parts.append(f"  <i>... and {len(entries) - 5} more</i>\n")
+                body_parts.append("\n")
+            
+            dialog.set_body("".join(body_parts))
+        else:
+            dialog.set_body(f"<b>Device:</b> <tt>{device_id}</tt>\n\nNo rules found for this device in /etc/udev/rules.d/")
+        
+        dialog.add_response("close", "Close")
+        dialog.set_default_response("close")
+        dialog.set_close_response("close")
+        
+        dialog.present()
+    
     def on_apply_clicked(self, button):
-        """Apply udev rules for selected devices"""
+        """Apply udev rules for selected devices - show device type selection first"""
         selected = self.get_selected_devices()
         if not selected:
             self.show_toast("No devices selected", error=True)
             return
         
-        # Build list of device names for confirmation
+        # Build list of device names
         device_list = []
         for device in selected:
             name = f"{device.vendor_name or 'Unknown'} {device.product_name or 'Device'}"
             vid_pid = f"[{device.vendor_id}:{device.product_id}]"
             device_list.append(f"• {name} {vid_pid}")
         
-        # Confirm action with device list
-        dialog = Adw.MessageDialog(transient_for=self)
-        dialog.set_heading("Create udev rules?")
-        dialog.set_body_use_markup(True)
+        # Create device type selection dialog
+        dialog = Adw.Window(transient_for=self)
+        dialog.set_modal(True)
+        dialog.set_default_size(500, 450)
+        dialog.set_title("Configure Device Rules")
         
-        body_text = f"This will create udev rules for <b>{len(selected)}</b> device(s):\n\n"
-        body_text += "\n".join(device_list[:10])  # Limit to 10 devices in preview
-        if len(device_list) > 10:
-            body_text += f"\n... and {len(device_list) - 10} more"
+        # Main content box
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        content.set_margin_top(24)
+        content.set_margin_bottom(24)
+        content.set_margin_start(24)
+        content.set_margin_end(24)
         
-        dialog.set_body(body_text)
+        # Header
+        header = Gtk.Label()
+        header.set_markup(f"<b>Create rules for {len(selected)} device(s)</b>")
+        header.set_halign(Gtk.Align.START)
+        content.append(header)
         
-        dialog.add_response("cancel", "Cancel")
-        dialog.add_response("apply", "Create Rules")
-        dialog.set_response_appearance("apply", Adw.ResponseAppearance.SUGGESTED)
-        dialog.set_default_response("cancel")
-        dialog.set_close_response("cancel")
+        # Device list preview (scrollable)
+        device_frame = Gtk.Frame()
+        device_frame.set_margin_bottom(8)
+        device_scroll = Gtk.ScrolledWindow()
+        device_scroll.set_max_content_height(100)
+        device_scroll.set_propagate_natural_height(True)
+        device_label = Gtk.Label(label="\n".join(device_list[:8]))
+        if len(device_list) > 8:
+            device_label.set_text(device_label.get_text() + f"\n... and {len(device_list) - 8} more")
+        device_label.set_halign(Gtk.Align.START)
+        device_label.set_margin_top(8)
+        device_label.set_margin_bottom(8)
+        device_label.set_margin_start(12)
+        device_scroll.set_child(device_label)
+        device_frame.set_child(device_scroll)
+        content.append(device_frame)
         
-        dialog.connect("response", self.on_apply_confirmed, selected)
+        # Device type selection
+        type_label = Gtk.Label()
+        type_label.set_markup("<b>Device Type Preset:</b>")
+        type_label.set_halign(Gtk.Align.START)
+        content.append(type_label)
+        
+        # Dropdown for device type
+        type_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        preset_dropdown = Gtk.DropDown()
+        preset_names = Gtk.StringList()
+        preset_keys = list(DEVICE_PRESETS.keys())
+        for key in preset_keys:
+            preset_names.append(DEVICE_PRESETS[key]["name"])
+        preset_dropdown.set_model(preset_names)
+        preset_dropdown.set_selected(0)  # Default to first (controller)
+        preset_dropdown.set_hexpand(True)
+        type_box.append(preset_dropdown)
+        content.append(type_box)
+        
+        # Description label
+        desc_label = Gtk.Label()
+        desc_label.set_markup(f"<i>{DEVICE_PRESETS[preset_keys[0]]['description']}</i>")
+        desc_label.set_halign(Gtk.Align.START)
+        desc_label.set_wrap(True)
+        desc_label.set_opacity(0.8)
+        content.append(desc_label)
+        
+        # Update description when selection changes
+        def on_preset_changed(dropdown, _pspec):
+            idx = dropdown.get_selected()
+            if idx < len(preset_keys):
+                desc_label.set_markup(f"<i>{DEVICE_PRESETS[preset_keys[idx]]['description']}</i>")
+        
+        preset_dropdown.connect("notify::selected", on_preset_changed)
+        
+        # Access toggles section
+        toggle_label = Gtk.Label()
+        toggle_label.set_markup("<b>Access Settings:</b>")
+        toggle_label.set_halign(Gtk.Align.START)
+        toggle_label.set_margin_top(12)
+        content.append(toggle_label)
+        
+        # Toggle switches
+        toggle_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        
+        webhid_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        webhid_switch = Gtk.Switch()
+        webhid_switch.set_active(True)
+        webhid_switch.set_valign(Gtk.Align.CENTER)
+        webhid_label = Gtk.Label(label="WebHID Access (browser config tools)")
+        webhid_label.set_halign(Gtk.Align.START)
+        webhid_label.set_hexpand(True)
+        webhid_row.append(webhid_label)
+        webhid_row.append(webhid_switch)
+        toggle_box.append(webhid_row)
+        
+        rawusb_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        rawusb_switch = Gtk.Switch()
+        rawusb_switch.set_active(False)
+        rawusb_switch.set_valign(Gtk.Align.CENTER)
+        rawusb_label = Gtk.Label(label="Raw USB Access (libusb, firmware flash)")
+        rawusb_label.set_halign(Gtk.Align.START)
+        rawusb_label.set_hexpand(True)
+        rawusb_row.append(rawusb_label)
+        rawusb_row.append(rawusb_switch)
+        toggle_box.append(rawusb_row)
+        
+        serial_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        serial_switch = Gtk.Switch()
+        serial_switch.set_active(False)
+        serial_switch.set_valign(Gtk.Align.CENTER)
+        serial_label = Gtk.Label(label="Serial Port Access (ttyUSB, ttyACM)")
+        serial_label.set_halign(Gtk.Align.START)
+        serial_label.set_hexpand(True)
+        serial_row.append(serial_label)
+        serial_row.append(serial_switch)
+        toggle_box.append(serial_row)
+        
+        content.append(toggle_box)
+        
+        # Update toggles when preset changes
+        def sync_toggles_from_preset(dropdown, _pspec):
+            idx = dropdown.get_selected()
+            if idx < len(preset_keys):
+                settings = DEVICE_PRESETS[preset_keys[idx]]["settings"]
+                webhid_switch.set_active(settings.get("webhid_access", True))
+                rawusb_switch.set_active(settings.get("raw_usb_access", False))
+                serial_switch.set_active(settings.get("serial_access", False))
+        
+        preset_dropdown.connect("notify::selected", sync_toggles_from_preset)
+        sync_toggles_from_preset(preset_dropdown, None)  # Initial sync
+        
+        # Buttons
+        button_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        button_box.set_halign(Gtk.Align.END)
+        button_box.set_margin_top(16)
+        
+        cancel_button = Gtk.Button(label="Cancel")
+        cancel_button.connect("clicked", lambda btn: dialog.close())
+        button_box.append(cancel_button)
+        
+        create_button = Gtk.Button(label="Create Rules")
+        create_button.add_css_class("suggested-action")
+        
+        def on_create_clicked(btn):
+            # Get selected preset
+            idx = preset_dropdown.get_selected()
+            preset_key = preset_keys[idx] if idx < len(preset_keys) else "generic"
+            
+            # Create profile with user overrides
+            profile = DeviceProfile(
+                device_type=preset_key,
+                webhid_access=webhid_switch.get_active(),
+                raw_usb_access=rawusb_switch.get_active(),
+                serial_access=serial_switch.get_active()
+            )
+            
+            dialog.close()
+            self.apply_rules_with_profile(selected, profile, preset_key)
+        
+        create_button.connect("clicked", on_create_clicked)
+        button_box.append(create_button)
+        
+        content.append(button_box)
+        dialog.set_content(content)
         dialog.present()
     
     def on_apply_confirmed(self, dialog, response, selected_devices):
@@ -733,6 +1019,89 @@ class UdevConfigWindow(Adw.ApplicationWindow):
                     GLib.idle_add(self.show_toast, "Authentication cancelled", True)
                 else:
                     error_msg = result.stderr.strip() if result.stderr else result.stdout.strip() if result.stdout else f"Exit code: {result.returncode}"
+                    GLib.idle_add(self.show_toast, f"Failed: {error_msg}", True)
+                
+            except FileNotFoundError:
+                GLib.idle_add(self.show_toast, "pkexec not found. Please install polkit.", True)
+            except Exception as e:
+                GLib.idle_add(self.show_toast, f"Error: {e}", True)
+            finally:
+                GLib.idle_add(self.set_loading, False)
+        
+        thread = threading.Thread(target=apply_thread)
+        thread.daemon = True
+        thread.start()
+    
+    def apply_rules_with_profile(self, selected_devices, profile, preset_key):
+        """Apply rules with specific device profile settings"""
+        self.set_loading(True)
+        self.progress_bar.set_text(f"Creating {preset_key} rules...")
+        
+        # Build device IDs from selected devices
+        device_ids = []
+        for device in selected_devices:
+            if device.vendor_id and device.product_id:
+                device_ids.append(f"{device.vendor_id}:{device.product_id}")
+        
+        if not device_ids:
+            self.show_toast("No valid devices selected", error=True)
+            self.set_loading(False)
+            return
+        
+        print(f"[GUI] Creating {preset_key} rules for {len(device_ids)} device(s)")
+        
+        def apply_thread():
+            try:
+                cli_tool = self.find_cli_tool()
+                if not cli_tool:
+                    GLib.idle_add(self.show_toast, "Could not find udev-autoconfig CLI tool", True)
+                    GLib.idle_add(self.set_loading, False)
+                    return
+                
+                # Build CLI arguments with profile settings
+                cli_args = ['--devices'] + device_ids
+                cli_args += ['--type', preset_key]
+                
+                if profile.raw_usb_access:
+                    cli_args.append('--raw-usb')
+                if profile.serial_access:
+                    cli_args.append('--serial')
+                if not profile.webhid_access:
+                    cli_args.append('--no-webhid')
+                
+                # Determine how to run the CLI tool
+                if os.geteuid() == 0:
+                    if cli_tool.endswith('.py'):
+                        cmd = [sys.executable, cli_tool] + cli_args
+                    else:
+                        cmd = [cli_tool] + cli_args
+                else:
+                    if cli_tool.endswith('.py'):
+                        cmd = ['pkexec', sys.executable, cli_tool] + cli_args
+                    else:
+                        cmd = ['pkexec', cli_tool] + cli_args
+                
+                print(f"[GUI] Running command: {' '.join(cmd)}")
+                
+                GLib.idle_add(self.progress_bar.set_text, "Requesting admin privileges...")
+                GLib.idle_add(self.progress_bar.set_fraction, 0.2)
+                
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                
+                if result.stdout:
+                    print(f"[CLI stdout] {result.stdout}")
+                if result.stderr:
+                    print(f"[CLI stderr] {result.stderr}")
+                
+                GLib.idle_add(self.progress_bar.set_fraction, 1.0)
+                
+                if result.returncode == 0:
+                    GLib.idle_add(self.show_toast, f"{preset_key.title()} rules created for {len(device_ids)} device(s)!")
+                    GLib.idle_add(self.load_devices)  # Refresh the list
+                elif result.returncode == 126:
+                    GLib.idle_add(self.show_toast, "Authentication cancelled", True)
+                else:
+                    error_msg = result.stderr.strip() if result.stderr else f"Exit code: {result.returncode}"
                     GLib.idle_add(self.show_toast, f"Failed: {error_msg}", True)
                 
             except FileNotFoundError:
@@ -886,6 +1255,174 @@ class UdevConfigWindow(Adw.ApplicationWindow):
         toast = Adw.Toast(title=message)
         toast.set_timeout(3 if not error else 5)
         self.toast_overlay.add_toast(toast)
+    
+    def on_scan_rules_clicked(self, button):
+        """Scan rules and display audit results"""
+        # Clear existing results
+        while child := self.audit_results_list.get_first_child():
+            self.audit_results_list.remove(child)
+        
+        # Get filter text
+        filter_query = self.audit_filter_entry.get_text().strip() or None
+        
+        # Run audit
+        auditor = RulesAuditor()
+        auditor.parse_rules()
+        
+        # Apply filter if provided
+        if filter_query:
+            query = filter_query.lower()
+            filtered_entries = []
+            for entry in auditor.entries:
+                device_id = f"{entry.vendor_id}:{entry.product_id}" if entry.product_id else entry.vendor_id
+                if query in device_id or query in entry.raw_line.lower():
+                    filtered_entries.append(entry)
+            auditor.entries = filtered_entries
+        
+        issues_found = False
+        
+        # Duplicates
+        duplicates = auditor.find_duplicates()
+        if duplicates:
+            issues_found = True
+            for device_id, entries in duplicates.items():
+                issue_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+                issue_box.set_margin_top(8)
+                issue_box.set_margin_bottom(8)
+                issue_box.set_margin_start(12)
+                issue_box.set_margin_end(12)
+                
+                header = Gtk.Label()
+                header.set_markup(f"<b>⚠ DUPLICATE:</b> <tt>{device_id}</tt>")
+                header.set_halign(Gtk.Align.START)
+                header.add_css_class("warning")
+                issue_box.append(header)
+                
+                for entry in entries:
+                    loc = Gtk.Label(label=f"  → {entry.filepath.name}:{entry.line_number}")
+                    loc.set_halign(Gtk.Align.START)
+                    loc.set_opacity(0.7)
+                    issue_box.append(loc)
+                
+                self.audit_results_list.append(issue_box)
+                self.audit_results_list.append(Gtk.Separator())
+        
+        # Conflicts
+        conflicts = auditor.find_conflicts()
+        if conflicts:
+            issues_found = True
+            for device_id, entries in conflicts.items():
+                issue_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+                issue_box.set_margin_top(8)
+                issue_box.set_margin_bottom(8)
+                issue_box.set_margin_start(12)
+                issue_box.set_margin_end(12)
+                
+                header = Gtk.Label()
+                header.set_markup(f"<b>✗ CONFLICT:</b> <tt>{device_id}</tt>")
+                header.set_halign(Gtk.Align.START)
+                header.add_css_class("error")
+                issue_box.append(header)
+                
+                for entry in entries:
+                    mode_str = f'MODE="{entry.mode}"' if entry.mode else ""
+                    group_str = f'GROUP="{entry.group}"' if entry.group else ""
+                    loc = Gtk.Label(label=f"  → {entry.filepath.name}: {mode_str} {group_str}")
+                    loc.set_halign(Gtk.Align.START)
+                    loc.set_opacity(0.7)
+                    issue_box.append(loc)
+                
+                self.audit_results_list.append(issue_box)
+                self.audit_results_list.append(Gtk.Separator())
+        
+        # Overlaps
+        overlaps = auditor.find_overlaps()
+        if overlaps:
+            issues_found = True
+            for vid, (vendor_entry, product_entries) in overlaps.items():
+                issue_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+                issue_box.set_margin_top(8)
+                issue_box.set_margin_bottom(8)
+                issue_box.set_margin_start(12)
+                issue_box.set_margin_end(12)
+                
+                header = Gtk.Label()
+                header.set_markup(f"<b>ℹ OVERLAP:</b> Vendor <tt>{vid}</tt> covers {len(product_entries)} product rules")
+                header.set_halign(Gtk.Align.START)
+                issue_box.append(header)
+                
+                loc = Gtk.Label(label=f"  → Vendor rule: {vendor_entry.filepath.name}:{vendor_entry.line_number}")
+                loc.set_halign(Gtk.Align.START)
+                loc.set_opacity(0.7)
+                issue_box.append(loc)
+                
+                self.audit_results_list.append(issue_box)
+                self.audit_results_list.append(Gtk.Separator())
+        
+        # If no issues
+        if not issues_found:
+            success_label = Gtk.Label()
+            if filter_query:
+                success_label.set_markup(f"<b>✓ No issues found for '{GLib.markup_escape_text(filter_query)}'</b>")
+            else:
+                success_label.set_markup("<b>✓ No issues found!</b>")
+            success_label.set_margin_top(32)
+            success_label.set_margin_bottom(32)
+            success_label.add_css_class("success")
+            self.audit_results_list.append(success_label)
+        
+        # Summary
+        summary = Gtk.Label()
+        summary.set_markup(f"<i>Scanned rules, {len(auditor.entries)} {'matched' if filter_query else 'total'}</i>")
+        summary.set_margin_top(12)
+        summary.set_margin_bottom(8)
+        summary.set_opacity(0.6)
+        self.audit_results_list.append(summary)
+        
+        # Build plain text version for clipboard
+        text_parts = ["=== udev-autoconfig Rules Audit ===\n"]
+        if filter_query:
+            text_parts.append(f"Filter: {filter_query}\n")
+        text_parts.append("")
+        
+        for device_id, entries in duplicates.items():
+            text_parts.append(f"⚠ DUPLICATE: {device_id}")
+            for entry in entries:
+                text_parts.append(f"  → {entry.filepath.name}:{entry.line_number}")
+            text_parts.append("")
+        
+        for device_id, entries in conflicts.items():
+            text_parts.append(f"✗ CONFLICT: {device_id}")
+            for entry in entries:
+                mode_str = f'MODE="{entry.mode}"' if entry.mode else ""
+                group_str = f'GROUP="{entry.group}"' if entry.group else ""
+                text_parts.append(f"  → {entry.filepath.name}: {mode_str} {group_str}")
+            text_parts.append("")
+        
+        for vid, (vendor_entry, product_entries) in overlaps.items():
+            text_parts.append(f"ℹ OVERLAP: Vendor {vid} covers {len(product_entries)} product rules")
+            text_parts.append(f"  → Vendor rule: {vendor_entry.filepath.name}:{vendor_entry.line_number}")
+            text_parts.append("")
+        
+        if not issues_found:
+            text_parts.append("✓ No issues found!")
+        
+        text_parts.append(f"\nScanned {len(auditor.entries)} rules total.")
+        
+        self.audit_results_text = "\n".join(text_parts)
+        self.copy_audit_button.set_sensitive(True)
+        
+        self.show_toast(f"Scan complete: {len(duplicates)} duplicates, {len(conflicts)} conflicts, {len(overlaps)} overlaps")
+    
+    def on_copy_audit_clicked(self, button):
+        """Copy audit results to clipboard"""
+        if not self.audit_results_text:
+            self.show_toast("No audit results to copy", error=True)
+            return
+        
+        clipboard = self.get_clipboard()
+        clipboard.set(self.audit_results_text)
+        self.show_toast("Audit results copied to clipboard!")
 
 
 class UdevConfigApp(Adw.Application):
