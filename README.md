@@ -4,7 +4,7 @@ Automatically generate udev rules for USB devices on Linux, enabling WebHID acce
 
 **Solves the "Failed to open the device" error when using web-based device configuration tools.**
 
-**Now with a native Linux GUI application!** 🎉
+**Now with a native Linux GUI application!**
 
 ## Installation
 
@@ -132,16 +132,16 @@ sudo ./install.sh --uninstall
 
 Many gaming peripherals use WebHID for configuration through browser-based tools. Without proper udev rules, you'll encounter:
 
-- ❌ "Failed to open the device" errors
-- ❌ "NotAllowedError" in Chrome/Chromium
-- ❌ Device not detected in configuration software
+- "Failed to open the device" errors
+- "NotAllowedError" in Chrome/Chromium
+- Device not detected in configuration software
 
 **Supported Devices:**
 
-- 🖱️ Gaming Mice: Pulsar, Finalmouse, Razer, Logitech G, SteelSeries, Glorious, Zowie
-- ⌨️ Gaming Keyboards: Wooting, Razer, Corsair, HyperX, Ducky
-- 🎮 Controllers: Xbox, PlayStation, 8BitDo
-- 🎧 Gaming Headsets and other USB peripherals
+- Gaming Mice: Pulsar, Finalmouse, Razer, Logitech G, SteelSeries, Glorious, Zowie
+- Gaming Keyboards: Wooting, Razer, Corsair, HyperX, Ducky
+- Controllers: Xbox, PlayStation, 8BitDo
+- Gaming Headsets and other USB peripherals
 
 This tool automatically creates the necessary udev rules with proper permissions for WebHID access.
 
@@ -309,7 +309,7 @@ Enter device numbers to create rules for (comma-separated, or 'all'):
 === Rules created successfully ===
 
 Applying rules...
-✓ Rules applied! Your devices should now work.
+Rules applied! Your devices should now work.
 ```
 
 ## Troubleshooting
