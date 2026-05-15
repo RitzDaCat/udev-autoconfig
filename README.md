@@ -8,23 +8,88 @@ Automatically generate udev rules for USB devices on Linux, enabling WebHID acce
 
 ## Installation
 
-### Arch Linux (Recommended)
+### Arch Linux / CachyOS
 
-Install from local PKGBUILD:
+Use the pacman package path on Arch-based systems. This keeps `/usr/bin`,
+the desktop entry, the polkit policy, dependencies, upgrades, and uninstall
+owned by the package manager.
+
+#### First-time install: latest code from GitHub
+
+This builds the newest commit from GitHub and installs it as
+`udev-autoconfig-git`:
 
 ```bash
 git clone https://github.com/RitzDaCat/udev-autoconfig.git
 cd udev-autoconfig
-makepkg -si --noconfirm -p PKGBUILD.local
+makepkg -si -p PKGBUILD.git
 ```
 
-For GUI support, also install the optional dependencies:
+Update later to the latest GitHub code:
 
 ```bash
-sudo pacman -S python-gobject gtk4 libadwaita
+cd udev-autoconfig
+git pull
+makepkg -si -p PKGBUILD.git
 ```
 
-To uninstall:
+Uninstall:
+
+```bash
+sudo pacman -Rns udev-autoconfig-git
+```
+
+#### AUR install/update flow
+
+If/when the AUR packages are published, users can install with an AUR helper:
+
+```bash
+# Stable release package
+paru -S udev-autoconfig
+
+# Latest GitHub package
+paru -S udev-autoconfig-git
+```
+
+Update stable package:
+
+```bash
+paru -Syu
+```
+
+Update VCS / latest-GitHub package:
+
+```bash
+paru -Syu --devel
+```
+
+The same package names work with `yay`:
+
+```bash
+yay -S udev-autoconfig-git
+yay -Syu --devel
+```
+
+#### Local development install
+
+Use this when you are editing this checkout and want to package exactly the
+files in the current directory instead of re-cloning GitHub:
+
+```bash
+git clone https://github.com/RitzDaCat/udev-autoconfig.git
+cd udev-autoconfig
+makepkg -si -p PKGBUILD.local
+```
+
+Update a local development install:
+
+```bash
+cd udev-autoconfig
+git pull
+makepkg -si -p PKGBUILD.local
+```
+
+Uninstall the local package:
 
 ```bash
 sudo pacman -Rns udev-autoconfig
@@ -32,16 +97,27 @@ sudo pacman -Rns udev-autoconfig
 
 ### Other Distributions
 
-Quick install via script:
+Clone the repository and run the installer from inside the checkout:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/RitzDaCat/udev-autoconfig/main/install.sh | sudo bash
+git clone https://github.com/RitzDaCat/udev-autoconfig.git
+cd udev-autoconfig
+sudo ./install.sh
 ```
 
-Or if you've cloned the repo:
+Manual update for script installs:
 
 ```bash
+cd udev-autoconfig
+git pull
 sudo ./install.sh
+```
+
+Manual uninstall for script installs:
+
+```bash
+cd udev-autoconfig
+sudo ./install.sh --uninstall
 ```
 
 ## What It Does
@@ -105,6 +181,9 @@ The CLI tool will:
 ## Other Commands
 
 ```bash
+# Show installed version
+udev-autoconfig --version
+
 # List all USB devices (no changes made)
 udev-autoconfig --list
 
@@ -203,6 +282,7 @@ sudo python3 udev-autoconfig.py
 sudo install -Dm755 udev-autoconfig.py /usr/local/bin/udev-autoconfig
 sudo install -Dm755 udev-autoconfig-gui.py /usr/local/bin/udev-autoconfig-gui
 sudo install -Dm644 udev-autoconfig.desktop /usr/share/applications/udev-autoconfig.desktop
+sudo install -Dm644 com.github.udev-autoconfig.policy /usr/share/polkit-1/actions/com.github.udev-autoconfig.policy
 ```
 
 ## How It Works
@@ -281,17 +361,15 @@ sudo udev-autoconfig --devices 045e:028e --type controller
 - GTK 4.0+
 - libadwaita 1.0+
 - PyGObject
+- polkit / pkexec for GUI privilege prompts
 
 ### Installing Dependencies
 
 **Arch Linux:**
 
 ```bash
-# Core (usually pre-installed)
-sudo pacman -S python systemd
-
-# GUI (optional)
-sudo pacman -S python-gobject gtk4 libadwaita
+# Installed automatically by the PKGBUILD package dependencies.
+sudo pacman -S python systemd python-gobject gtk4 libadwaita polkit
 ```
 
 **Debian/Ubuntu:**
@@ -311,15 +389,25 @@ sudo dnf install python3-gobject gtk4 libadwaita
 **Arch Linux:**
 
 ```bash
+# Stable/local package
 sudo pacman -Rns udev-autoconfig
+
+# Latest-GitHub package
+sudo pacman -Rns udev-autoconfig-git
 ```
 
 **Manual uninstall (other distros):**
 
 ```bash
+# Preferred if you still have the cloned repository
+cd udev-autoconfig
+sudo ./install.sh --uninstall
+
+# Or remove the files directly
 sudo rm /usr/local/bin/udev-autoconfig
 sudo rm /usr/local/bin/udev-autoconfig-gui
 sudo rm /usr/share/applications/udev-autoconfig.desktop
+sudo rm /usr/share/polkit-1/actions/com.github.udev-autoconfig.policy
 # Optionally remove generated rules:
 sudo rm /etc/udev/rules.d/50-*.rules
 ```

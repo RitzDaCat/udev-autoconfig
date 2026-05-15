@@ -1,6 +1,12 @@
 # Maintainer: RitzDaCat <https://github.com/RitzDaCat>
-pkgname=udev-autoconfig
-pkgver=1.0.0
+# VCS PKGBUILD - builds the latest code from GitHub
+#
+# For AUR publishing as udev-autoconfig-git, copy this file to the
+# udev-autoconfig-git AUR repository as PKGBUILD and generate .SRCINFO with:
+#   makepkg --printsrcinfo > .SRCINFO
+pkgname=udev-autoconfig-git
+_pkgname=udev-autoconfig
+pkgver=1.0.0.r0.g0000000
 pkgrel=1
 pkgdesc="Automatically generate udev rules for USB devices, enabling WebHID access for gaming peripherals"
 arch=('any')
@@ -14,30 +20,38 @@ depends=(
     'libadwaita'
     'polkit'
 )
-source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+makedepends=('git')
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+source=("git+$url.git")
 sha256sums=('SKIP')
 
-# For local development builds, use this instead:
-# source=("git+$url.git")
+pkgver() {
+    cd "$srcdir/$_pkgname"
+
+    local basever
+    basever="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' udev-autoconfig.py)"
+    printf "%s.r%s.g%s" "$basever" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
 
 package() {
-    cd "$srcdir/$pkgname-$pkgver"
-    
+    cd "$srcdir/$_pkgname"
+
     # Install CLI tool
     install -Dm755 udev-autoconfig.py "$pkgdir/usr/bin/udev-autoconfig"
-    
+
     # Install GUI tool
     install -Dm755 udev-autoconfig-gui.py "$pkgdir/usr/bin/udev-autoconfig-gui"
-    
+
     # Install desktop entry
     install -Dm644 udev-autoconfig.desktop "$pkgdir/usr/share/applications/udev-autoconfig.desktop"
-    
+
     # Install polkit policy for GUI privilege escalation
     install -Dm644 com.github.udev-autoconfig.policy "$pkgdir/usr/share/polkit-1/actions/com.github.udev-autoconfig.policy"
-    
+
     # Install license
-    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
-    
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$_pkgname/LICENSE"
+
     # Install documentation
-    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$_pkgname/README.md"
 }

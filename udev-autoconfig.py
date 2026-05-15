@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import List, Dict, Optional
 import re
 
+__version__ = "1.0.0"
+
 
 # Device type to primary group mapping
 TYPE_TO_GROUP = {
@@ -1029,6 +1031,9 @@ Examples:
                        help='Filter audit results by device name or VID:PID (e.g., "xbox" or "045e:028e")')
     parser.add_argument('--show', type=str, metavar='VID:PID',
                        help='Show all rules for a specific device by VID:PID (e.g., 045e:028e for Xbox controller)')
+    parser.add_argument('--version', action='version',
+                       version=f'%(prog)s {__version__}',
+                       help='Show installed udev-autoconfig version and exit')
     
     args = parser.parse_args()
     

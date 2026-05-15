@@ -1456,7 +1456,7 @@ class UdevConfigApp(Adw.Application):
             application_name="USB Device Configuration",
             application_icon="preferences-system",
             developer_name="USB Device Auto-Config",
-            version="1.0.0",
+            version=getattr(udev_module, "__version__", "unknown"),
             developers=["USB Device Auto-Config Contributors"],
             copyright="© 2025 USB Device Auto-Config",
             website="https://github.com/RitzDaCat/udev-autoconfig",

@@ -7,12 +7,13 @@ pkgdesc="Automatically generate udev rules for USB devices, enabling WebHID acce
 arch=('any')
 url="https://github.com/RitzDaCat/udev-autoconfig"
 license=('MIT')
-depends=('python' 'systemd')
-optdepends=(
-    'python-gobject: GUI support'
-    'gtk4: GUI support'
-    'libadwaita: GUI support'
-    'polkit: GUI privilege escalation'
+depends=(
+    'python'
+    'systemd'
+    'python-gobject'
+    'gtk4'
+    'libadwaita'
+    'polkit'
 )
 
 # No source - we build from current directory
@@ -40,4 +41,3 @@ package() {
     # Install documentation
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
 }
-
